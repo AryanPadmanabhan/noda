@@ -1,0 +1,18 @@
+{
+  "release_id": "80042e10-e62d-4fac-ac45-17c8ce5c2b55",
+  "rollout_name": "demo-rollout",
+  "selector": {
+    "target_type": "edge-linux-x86",
+    "labels": {
+      "region": "lab"
+    },
+    "mission_states": ["idle"]
+  },
+  "strategy": {
+    "canary": 1,
+    "batch_size": 10,
+    "max_parallel": 2,
+    "max_failure_rate": 0.2,
+    "require_idle": true
+  }
+}

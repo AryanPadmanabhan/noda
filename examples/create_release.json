@@ -1,0 +1,34 @@
+{
+  "version": "2.4.1",
+  "manifest": {
+    "target_type": "edge-linux-x86",
+    "artifact": {
+      "url": "file:///Users/aryanpaddy/Downloads/deploy-intent-full/examples/demo-artifact.bin",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "install": {
+      "install_type": "ab-image",
+      "executor": "grub-ab",
+      "slot_pair": ["A", "B"]
+    },
+    "activation": {
+      "activation_type": "bootloader-switch",
+      "bootloader": "grub"
+    },
+    "rollback": {
+      "automatic": true,
+      "on_boot_failure": true,
+      "on_health_failure": true,
+      "candidate_timeout_seconds": 900
+    },
+    "health_checks": [
+      {
+        "name": "demo-pass",
+        "kind": "always_pass"
+      }
+    ],
+    "labels": {
+      "track": "prod"
+    }
+  }
+}
