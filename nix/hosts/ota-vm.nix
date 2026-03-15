@@ -1,33 +1,38 @@
 { self, pkgs, ... }:
 {
-  imports = [ ];
+  imports = [
+    ./hardware-configuration.nix
+  ];
 
   system.stateVersion = "25.11";
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-  boot.loader.systemd-boot.enable = true;
-  boot.loader.efi.canTouchEfiVariables = true;
-
-  fileSystems."/" = {
-    device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
+  boot.loader.grub = {
+    enable = true;
+    efiSupport = true;
+    device = "nodev";
   };
 
+  boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.efi.efiSysMountPoint = "/boot";
+
   networking.hostName = "ota-vm";
-  networking.useNetworkd = true;
-  systemd.network.enable = true;
+  networking.networkmanager.enable = true;
+
+  time.timeZone = "America/Chicago";
 
   environment.systemPackages = [ pkgs.tree ];
   environment.etc."deploy-intent/baseline-release".text = "baseline";
 
   services.openssh.enable = true;
+  services.openssh.settings.PasswordAuthentication = true;
 
   services.deploy-intent-agent = {
     enable = true;
     package = self.packages.${pkgs.system}.deploy-intent;
     serverUrl = "http://10.2.24.81:8080";
-    assetId = "ota-vm";
+    assetId = "nix-vm-1";
     assetType = "edge-linux-aarch64";
     missionState = "idle";
     pollSeconds = 15;
