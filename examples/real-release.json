@@ -3,7 +3,7 @@
   "manifest": {
     "target_type": "edge-linux-aarch64",
     "artifact": {
-      "url": "file:///home/aryanp/deploy-intent-full/README.md",
+      "url": "file:///home/aryanp/deploy-intent/README.md",
       "sha256": null,
       "headers": {}
     },
@@ -14,7 +14,7 @@
       "install_command": null,
       "install_args": [],
       "nix_generation": {
-        "source_path": "/home/aryanp/deploy-intent-full",
+        "source_path": "/home/aryanp/deploy-intent",
         "flake_attr": "nixosConfigurations.ota-vm.config.system.build.toplevel",
         "expected_hostname": "ota-vm",
         "validation_timeout_seconds": 900

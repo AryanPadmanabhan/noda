@@ -11,12 +11,9 @@
     ];
 
   services.spice-vdagentd.enable = true;
-  # Bootloader.
-  #  boot.loader.systemd-boot.enable = true;
-  # boot.loader.efi.canTouchEfiVariables = true;
-  
-  boot.loader.grub.enable = true;
-  boot.loader.grub.device = "/dev/vda";
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.efi.efiSysMountPoint = "/boot";
 
   
   networking.hostName = "ota-vm"; # Define your hostname.
