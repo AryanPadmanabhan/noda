@@ -1,9 +1,9 @@
 {
-  "version": "bootstrap-agent-1",
+  "version": "artifact-copy-1",
   "manifest": {
     "target_type": "edge-linux-aarch64",
     "artifact": {
-      "url": "file:///home/aryanp/deploy-intent/README.md",
+      "url": "nix-store:///nix/store/REPLACE_WITH_TOPLEVEL",
       "sha256": null,
       "headers": {}
     },
@@ -14,8 +14,8 @@
       "install_command": null,
       "install_args": [],
       "nix_generation": {
-        "source_path": "/home/aryanp/deploy-intent",
-        "flake_attr": "nixosConfigurations.ota-vm.config.system.build.toplevel",
+        "copy_from": "ssh://aryanpaddy@10.2.24.81",
+        "store_path": "/nix/store/REPLACE_WITH_TOPLEVEL",
         "expected_hostname": "ota-vm",
         "validation_timeout_seconds": 900
       }

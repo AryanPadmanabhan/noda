@@ -1,6 +1,6 @@
 {
-  "release_id": "ed06919c-c45c-43db-87c8-698659b7c0f5",
-  "rollout_name": "ota-vm-bootstrap-agent",
+  "release_id": "a094ca15-c0ac-436f-87e4-a02028c94da0",
+  "rollout_name": "ota-vm-artifact-copy",
   "selector": {
     "target_type": "edge-linux-aarch64",
     "labels": {
