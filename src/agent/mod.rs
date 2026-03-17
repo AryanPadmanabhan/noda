@@ -266,8 +266,13 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
         release = %cmd.release_version,
         "executing command"
     );
-    let artifact_path = download_artifact(client, &cfg.state_dir, &cmd.manifest.artifact).await?;
-    verify_sha256(&artifact_path, cmd.manifest.artifact.sha256.as_deref())?;
+    let artifact_path = if uses_nix_copy_artifact(&cmd.manifest) {
+        PathBuf::from(cmd.manifest.artifact.url.clone())
+    } else {
+        let path = download_artifact(client, &cfg.state_dir, &cmd.manifest.artifact).await?;
+        verify_sha256(&path, cmd.manifest.artifact.sha256.as_deref())?;
+        path
+    };
 
     let mut state = load_state(&cfg.state_dir)?;
     let executor = executors::build(&cmd.manifest.install.executor);
@@ -319,6 +324,15 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
             Ok(CommandExecution::Deferred { state })
         }
     }
+}
+
+fn uses_nix_copy_artifact(manifest: &ReleaseManifest) -> bool {
+    manifest
+        .install
+        .nix_generation
+        .as_ref()
+        .and_then(|cfg| cfg.copy_from.as_ref().zip(cfg.store_path.as_ref()))
+        .is_some()
 }
 
 fn compute_next_slot(current: &str, pair: &Option<[String; 2]>) -> String {

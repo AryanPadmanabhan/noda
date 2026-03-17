@@ -981,3 +981,132 @@ async fn nix_generation_command_completes_after_agent_restart_and_validation() {
     let asets = assets(&env).await;
     assert_eq!(asets[0].current_version.as_deref(), Some("8.0.0"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nix_generation_copy_mode_completes_after_restart_and_validation() {
+    let mut env = test_env(
+        "nix-copy-mode",
+        &[("node-01", "edge-linux-x86", "idle", vec!["region=lab"])],
+    )
+    .await;
+    let current_system_link = env.root.join("current-system-copy");
+    let baseline_system = env.root.join("systems").join("baseline-copy");
+    fs::create_dir_all(&baseline_system).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&baseline_system, &current_system_link).unwrap();
+
+    let replacement = env.agents.pop().unwrap();
+    drop(replacement);
+    env.agents.push(spawn_agent_with_env(
+        &env.server_url,
+        &env.root,
+        "node-01",
+        "edge-linux-x86",
+        "idle",
+        &["region=lab"],
+        &[(
+            "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
+            current_system_link.to_str().unwrap(),
+        )],
+    ));
+
+    let imported_system = env.root.join("imported-store").join("gui-restore-2");
+    let artifact_ref = format!("nix-store://{}", imported_system.display());
+    let release = create_release_from_manifest(
+        &env,
+        "8.1.0",
+        json!({
+            "target_type": "edge-linux-x86",
+            "artifact": {
+                "url": artifact_ref,
+                "sha256": Value::Null,
+                "headers": {}
+            },
+            "install": {
+                "install_type": "nix-generation",
+                "executor": "nix-generation",
+                "slot_pair": ["A", "B"],
+                "nix_generation": {
+                    "copy_from": "ssh://builder@example",
+                    "store_path": imported_system.display().to_string(),
+                    "copy_command": "mkdir -p \"$NIX_STORE_PATH/bin\"",
+                    "boot_command": "ln -sfn \"$EXPECTED_SYSTEM_PATH\" \"$DEPLOY_INTENT_CURRENT_SYSTEM_LINK\"",
+                    "reboot_command": "true",
+                    "validation_timeout_seconds": 60
+                }
+            },
+            "activation": {
+                "activation_type": "reboot"
+            },
+            "rollback": {
+                "automatic": true,
+                "on_boot_failure": true,
+                "on_health_failure": true,
+                "rollback_command": Value::Null,
+                "candidate_timeout_seconds": 900
+            },
+            "health_checks": [always_pass_check()],
+            "labels": {"track": "test"}
+        }),
+    )
+    .await;
+
+    let deployment = create_deployment(
+        &env,
+        &release.id,
+        "edge-linux-x86",
+        json!({"region": "lab"}),
+        vec!["idle"],
+        0,
+        1,
+        1.0,
+        true,
+    )
+    .await;
+
+    let agent_state_path = env.root.join("state-node-01").join("state.json");
+    wait_until(Duration::from_secs(15), || {
+        let env = &env;
+        let deployment_id = deployment.id.clone();
+        let agent_state_path = agent_state_path.clone();
+        async move {
+            let ts = targets(env, &deployment_id).await;
+            let has_pending_boot = fs::read_to_string(&agent_state_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|value| value.get("pending_boot").cloned())
+                .map(|value| !value.is_null())
+                .unwrap_or(false);
+            Some(ts.len() == 1 && ts[0].state == "issued" && has_pending_boot)
+        }
+    })
+    .await;
+
+    let replacement = env.agents.pop().unwrap();
+    drop(replacement);
+    env.agents.push(spawn_agent_with_env(
+        &env.server_url,
+        &env.root,
+        "node-01",
+        "edge-linux-x86",
+        "idle",
+        &["region=lab"],
+        &[(
+            "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
+            current_system_link.to_str().unwrap(),
+        )],
+    ));
+
+    wait_until(Duration::from_secs(20), || {
+        let env = &env;
+        let deployment_id = deployment.id.clone();
+        async move {
+            let ts = targets(env, &deployment_id).await;
+            Some(ts.len() == 1 && ts[0].state == "succeeded")
+        }
+    })
+    .await;
+
+    let asets = assets(&env).await;
+    assert_eq!(asets[0].current_version.as_deref(), Some("8.1.0"));
+}

@@ -113,7 +113,29 @@ impl Executor for NixGenerationExecutor {
                 ("NIX_FLAKE_ATTR", cfg.flake_attr.clone().unwrap_or_default()),
             ];
 
-            let built_system = if let Some(cmd) = &cfg.build_command {
+            let built_system = if let Some(store_path) = &cfg.store_path {
+                let copy_from = cfg
+                    .copy_from
+                    .as_ref()
+                    .context("missing install.nix_generation.copy_from for store-path import")?;
+                let extra = [
+                    ("NIX_COPY_FROM", copy_from.clone()),
+                    ("NIX_STORE_PATH", store_path.clone()),
+                ];
+                let env = shell_env(ctx, &extra);
+                if let Some(cmd) = &cfg.copy_command {
+                    run_shell(cmd, &env)?;
+                } else {
+                    let status = Command::new("nix")
+                        .args(["copy", "--from", copy_from, store_path])
+                        .status()
+                        .with_context(|| format!("running nix copy --from {copy_from} {store_path}"))?;
+                    if !status.success() {
+                        return Err(anyhow!("nix copy failed for {store_path} from {copy_from}"));
+                    }
+                }
+                store_path.clone()
+            } else if let Some(cmd) = &cfg.build_command {
                 let stdout = run_shell_capture(cmd, &shell_env(ctx, &extra))?;
                 parse_system_path(&stdout)?
             } else {
@@ -152,6 +174,25 @@ impl Executor for NixGenerationExecutor {
 
             if let Some(cmd) = &cfg.boot_command {
                 run_shell(cmd, &env)?;
+            } else if cfg.store_path.is_some() {
+                let status = Command::new("nix-env")
+                    .args(["-p", "/nix/var/nix/profiles/system", "--set", &metadata.system_path])
+                    .status()
+                    .with_context(|| format!("registering system profile for {}", metadata.system_path))?;
+                if !status.success() {
+                    return Err(anyhow!("nix-env --set failed for {}", metadata.system_path));
+                }
+                let switch_to_configuration = Path::new(&metadata.system_path).join("bin/switch-to-configuration");
+                let status = Command::new(&switch_to_configuration)
+                    .arg("boot")
+                    .status()
+                    .with_context(|| format!("running {}", switch_to_configuration.display()))?;
+                if !status.success() {
+                    return Err(anyhow!(
+                        "switch-to-configuration boot failed for {}",
+                        metadata.system_path
+                    ));
+                }
             } else if let Some(config_name) = nixos_config_name(cfg) {
                 let flake = flake_ref(ctx, cfg);
                 let flake_target = format!("{flake}#{config_name}");

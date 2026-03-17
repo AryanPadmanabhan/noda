@@ -1,5 +1,5 @@
 {
-  "release_id": "814c6b83-0b77-405b-9588-097bd78e18ee",
+  "release_id": "9e61b6ce-4159-4ab0-8252-069d19ba7199",
   "rollout_name": "ota-vm-gui-restore",
   "selector": {
     "target_type": "edge-linux-aarch64",

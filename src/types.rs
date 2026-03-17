@@ -55,6 +55,12 @@ pub struct NixGenerationConfig {
     #[serde(default)]
     pub source_path: Option<String>,
     #[serde(default)]
+    pub copy_from: Option<String>,
+    #[serde(default)]
+    pub store_path: Option<String>,
+    #[serde(default)]
+    pub copy_command: Option<String>,
+    #[serde(default)]
     pub build_command: Option<String>,
     #[serde(default)]
     pub boot_command: Option<String>,
