@@ -3,7 +3,7 @@
   "manifest": {
     "target_type": "edge-linux-aarch64",
     "artifact": {
-      "url": "nix-store:///nix/store/REPLACE_WITH_TOPLEVEL",
+      "url": "file:///etc/hosts",
       "sha256": null,
       "headers": {}
     },
@@ -15,7 +15,7 @@
       "install_args": [],
       "nix_generation": {
         "copy_from": "ssh://aryanpaddy@10.2.24.81",
-        "store_path": "/nix/store/REPLACE_WITH_TOPLEVEL",
+        "store_path": "/nix/store/7pgsv7h4jmz358dlciz0k4fa5m7qd215-nixos-system-ota-vm-nix-copy-25.11.20260313.3e20095",
         "expected_hostname": "ota-vm",
         "validation_timeout_seconds": 900
       }
@@ -34,9 +34,9 @@
     },
     "health_checks": [
       {
-        "name": "agent-active",
+        "name": "noda-active",
         "kind": "command_exit_zero",
-        "command": "systemctl is-active deploy-intent-agent"
+        "command": "systemctl is-active noda"
       },
       {
         "name": "display-manager-active",

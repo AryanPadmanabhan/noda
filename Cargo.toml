@@ -1,8 +1,8 @@
 [package]
-name = "deploy-intent"
+name = "noda"
 version = "0.2.0"
 edition = "2021"
-description = "Self-hosted deployment-intent orchestrator and agent for customer-owned artifacts"
+description = "Self-hosted OTA orchestrator and agent for customer-owned artifacts"
 license = "Apache-2.0"
 
 [dependencies]

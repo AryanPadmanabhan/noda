@@ -319,27 +319,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deploy-intent"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "clap",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -912,6 +891,27 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "noda"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]

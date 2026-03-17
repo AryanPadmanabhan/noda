@@ -3,7 +3,7 @@
   "manifest": {
     "target_type": "edge-linux-aarch64",
     "artifact": {
-      "url": "file:///home/aryanp/deploy-intent/README.md",
+      "url": "file:///home/aryanp/noda/README.md",
       "sha256": null,
       "headers": {}
     },
@@ -14,7 +14,7 @@
       "install_command": null,
       "install_args": [],
       "nix_generation": {
-        "source_path": "/home/aryanp/deploy-intent",
+        "source_path": "/home/aryanp/noda",
         "flake_attr": "nixosConfigurations.ota-vm.config.system.build.toplevel",
         "expected_hostname": "ota-vm",
         "validation_timeout_seconds": 900
@@ -34,9 +34,9 @@
     },
     "health_checks": [
       {
-        "name": "agent-active",
+        "name": "noda-active",
         "kind": "command_exit_zero",
-        "command": "systemctl is-active deploy-intent-agent"
+        "command": "systemctl is-active noda"
       },
       {
         "name": "display-manager-active",

@@ -3,7 +3,7 @@
   "manifest": {
     "target_type": "edge-linux-x86",
     "artifact": {
-      "url": "file:///Users/aryanpaddy/Downloads/deploy-intent-full/examples/demo-artifact.bin",
+      "url": "file:///Users/aryanpaddy/Downloads/noda/examples/demo-artifact.bin",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
     "install": {

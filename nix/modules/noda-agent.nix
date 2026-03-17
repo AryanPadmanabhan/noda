@@ -1,10 +1,10 @@
 { lib, pkgs, config, ... }:
 let
-  cfg = config.services.deploy-intent-agent;
+  cfg = config.services.noda;
   inherit (lib) concatStringsSep escapeShellArg mkEnableOption mkIf mkOption types;
   labelArgs = concatStringsSep " " (map (label: "--labels ${escapeShellArg label}") cfg.labels);
-  startScript = pkgs.writeShellScript "deploy-intent-agent-start" ''
-    exec ${cfg.package}/bin/deploy-intent agent \
+  startScript = pkgs.writeShellScript "noda-start" ''
+    exec ${cfg.package}/bin/noda agent \
       --server ${escapeShellArg cfg.serverUrl} \
       --asset-id ${escapeShellArg cfg.assetId} \
       --asset-type ${escapeShellArg cfg.assetType} \
@@ -16,12 +16,12 @@ let
   '';
 in
 {
-  options.services.deploy-intent-agent = {
-    enable = mkEnableOption "deploy-intent polling agent";
+  options.services.noda = {
+    enable = mkEnableOption "NODA polling agent";
 
     package = mkOption {
       type = types.package;
-      description = "deploy-intent package to run.";
+      description = "Package providing the NODA agent binary.";
     };
 
     serverUrl = mkOption {
@@ -54,7 +54,7 @@ in
 
     stateDir = mkOption {
       type = types.str;
-      default = "/var/lib/deploy-intent";
+      default = "/var/lib/noda";
       description = "Persistent state directory for downloads and reboot-resume state.";
     };
 
@@ -75,7 +75,7 @@ in
     assertions = [
       {
         assertion = cfg.package != null;
-        message = "services.deploy-intent-agent.package must be set.";
+        message = "services.noda.package must be set.";
       }
     ];
 
@@ -83,8 +83,8 @@ in
       "d ${cfg.stateDir} 0750 root root -"
     ];
 
-    systemd.services.deploy-intent-agent = {
-      description = "deploy-intent agent";
+    systemd.services.noda = {
+      description = "node over-the-air agent";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];

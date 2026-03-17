@@ -1,6 +1,6 @@
-# deploy-intent
+# noda
 
-A self-hosted **deployment-intent orchestrator** and **target-side agent** for customer-owned artifacts.
+A self-hosted **OTA orchestrator** and **target-side agent** for customer-owned artifacts.
 
 This project does **not** build artifacts and does **not** require vendor-hosted storage.
 Instead, it handles:
@@ -20,7 +20,7 @@ Instead, it handles:
 This is intentionally focused on the strongest MVP boundary:
 
 - **customer owns** build pipeline, artifact store, and release contents
-- **this project owns** deployment intent, activation flow, validation, and rollback signaling
+- **this project owns** OTA intent, activation flow, validation, and rollback signaling
 
 ## Included executors
 
@@ -57,7 +57,7 @@ cargo build
 ## Run the server
 
 ```bash
-cargo run -- server --bind 127.0.0.1:8080 --db deploy_intent.db
+cargo run -- server --bind 127.0.0.1:8080 --db noda.db
 ```
 
 ## Run an agent
@@ -70,6 +70,57 @@ cargo run -- agent \
   --mission-state idle \
   --labels region=lab
 ```
+
+## Nix-native enrollment
+
+For NixOS-managed nodes, the intended onboarding path is:
+
+1. Add this repo as a flake input in the user's own flake.
+2. Import `noda.nixosModules.noda`.
+3. Enable `services.noda`.
+4. Rebuild the host once.
+
+Example host snippet:
+
+```nix
+{
+  inputs.noda.url = "github:YOUR_ORG/noda";
+
+  outputs = { self, nixpkgs, noda, ... }: {
+    nixosConfigurations.node-1 = nixpkgs.lib.nixosSystem {
+      system = "aarch64-linux";
+      modules = [
+        ./hardware-configuration.nix
+        ./node-1.nix
+        noda.nixosModules.noda
+      ];
+    };
+  };
+}
+```
+
+```nix
+{ noda, pkgs, ... }:
+{
+  services.noda = {
+    enable = true;
+    package = noda.packages.${pkgs.system}.noda;
+    serverUrl = "http://127.0.0.1:8080";
+    assetId = "node-1";
+    assetType = "edge-linux-aarch64";
+    labels = [ "region=lab" ];
+  };
+}
+```
+
+After rebuild:
+
+```bash
+sudo nixos-rebuild switch --flake .#node-1
+systemctl status noda
+```
+
+See the `examples/nix-native-enrollment` example for a minimal local setup.
 
 ## API surface
 
@@ -206,4 +257,4 @@ examples/
 scripts/
   demo-health.sh
 ```
-# deploy-intent
+# noda

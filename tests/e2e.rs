@@ -61,14 +61,14 @@ struct DeploymentTargetRecord {
 }
 
 fn bin_path() -> PathBuf {
-    if let Ok(p) = env::var("CARGO_BIN_EXE_deploy-intent") {
+    if let Ok(p) = env::var("CARGO_BIN_EXE_noda") {
         return PathBuf::from(p);
     }
 
     let exe_name = if cfg!(windows) {
-        "deploy-intent.exe"
+        "noda.exe"
     } else {
-        "deploy-intent"
+        "noda"
     };
 
     // Typical integration-test layout: target/debug/deps/<test-binary>
@@ -83,17 +83,17 @@ fn bin_path() -> PathBuf {
 
     // Fallback: build the main binary if Cargo didn't expose CARGO_BIN_EXE_*
     let status = Command::new("cargo")
-        .args(["build", "--bin", "deploy-intent"])
+        .args(["build", "--bin", "noda"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .expect("failed to invoke cargo build for deploy-intent binary");
-    assert!(status.success(), "cargo build --bin deploy-intent failed");
+        .expect("failed to invoke cargo build for noda binary");
+    assert!(status.success(), "cargo build --bin noda failed");
 
     let candidate = PathBuf::from("target").join("debug").join(exe_name);
     assert!(
         candidate.exists(),
-        "deploy-intent binary not found at {}",
+        "noda binary not found at {}",
         candidate.display()
     );
     candidate
@@ -102,7 +102,7 @@ fn bin_path() -> PathBuf {
 
 fn unique_root(name: &str) -> PathBuf {
     let dir = env::temp_dir().join(format!(
-        "deploy-intent-tests-{}-{}",
+        "noda-tests-{}-{}",
         name,
         Uuid::new_v4()
     ));
@@ -119,7 +119,7 @@ async fn start_server(root: &Path) -> (ChildGuard, String) {
     let port = free_port();
     let bind = format!("127.0.0.1:{port}");
     let server_url = format!("http://{bind}");
-    let db_path = root.join("deploy-intent.db");
+    let db_path = root.join("noda.db");
 
     let child = Command::new(bin_path())
         .arg("server")

@@ -1,5 +1,5 @@
 {
-  description = "deploy-intent: deployment intent orchestrator and NixOS agent";
+  description = "noda: OTA orchestrator and NixOS agent";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -12,28 +12,28 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
-        packages.deploy-intent = pkgs.rustPlatform.buildRustPackage {
-          pname = "deploy-intent";
+        packages.noda = pkgs.rustPlatform.buildRustPackage {
+          pname = "noda";
           version = "0.2.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
         };
 
-        packages.default = self.packages.${system}.deploy-intent;
+        packages.default = self.packages.${system}.noda;
 
         apps.default = {
           type = "app";
-          program = "${self.packages.${system}.deploy-intent}/bin/deploy-intent";
+          program = "${self.packages.${system}.noda}/bin/noda";
         };
       }) // {
-        nixosModules.deploy-intent-agent = import ./nix/modules/deploy-intent-agent.nix;
+        nixosModules.noda = import ./nix/modules/noda-agent.nix;
         nixosModules.ota-vm = import ./nix/hosts/ota-vm.nix;
 
         nixosConfigurations.ota-vm = nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
           specialArgs = { inherit self; };
           modules = [
-            self.nixosModules.deploy-intent-agent
+            self.nixosModules.noda
             self.nixosModules.ota-vm
           ];
         };

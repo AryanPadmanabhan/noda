@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser)]
-#[command(name = "deploy-intent")]
-#[command(about = "Deployment-intent orchestrator and agent for customer-owned artifacts")]
+#[command(name = "noda")]
+#[command(about = "OTA orchestrator and agent for customer-owned artifacts")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -24,7 +24,7 @@ enum Commands {
     Server {
         #[arg(long, default_value = "127.0.0.1:8080")]
         bind: String,
-        #[arg(long, default_value = "deploy_intent.db")]
+        #[arg(long, default_value = "noda.db")]
         db: PathBuf,
     },
     /// Run the agent loop for a single asset.

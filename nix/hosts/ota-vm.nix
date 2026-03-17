@@ -99,15 +99,15 @@
    gcc
   ];
 
-  services.deploy-intent-agent = {
+  services.noda = {
     enable = true;
-    package = self.packages.${pkgs.system}.deploy-intent;
+    package = self.packages.${pkgs.system}.noda;
     serverUrl = "http://10.2.24.81:8080";
     assetId = "nix-vm-1";
     assetType = "edge-linux-aarch64";
     missionState = "idle";
     pollSeconds = 15;
-    stateDir = "/var/lib/deploy-intent";
+    stateDir = "/var/lib/noda";
     labels = [ "region=lab" ];
   };
 
@@ -122,7 +122,7 @@
   # List services that you want to enable:
 
   # Enable the OpenSSH daemon.
-  # services.openssh.enable = true;
+  services.openssh.enable = true;
 
   # Open ports in the firewall.
   # networking.firewall.allowedTCPPorts = [ ... ];
