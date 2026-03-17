@@ -73,6 +73,45 @@ cargo run -- agent \
 
 ## Nix-native enrollment
 
+For NixOS-managed control-plane hosts, the intended server path is:
+
+1. Add this repo as a flake input in the host's own flake.
+2. Import `noda.nixosModules.noda-server`.
+3. Enable `services.noda-server`.
+4. Rebuild the host once.
+
+Example control-plane snippet:
+
+```nix
+{
+  inputs.noda.url = "github:YOUR_ORG/noda";
+
+  outputs = { self, nixpkgs, noda, ... }: {
+    nixosConfigurations.control-plane = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./hardware-configuration.nix
+        noda.nixosModules.noda-server
+        ({ pkgs, ... }: {
+          services.noda-server = {
+            enable = true;
+            package = noda.packages.${pkgs.system}.noda;
+            bind = "0.0.0.0:8080";
+          };
+        })
+      ];
+    };
+  };
+}
+```
+
+After rebuild:
+
+```bash
+sudo nixos-rebuild switch --flake .#control-plane
+systemctl status noda-server
+```
+
 For NixOS-managed nodes, the intended onboarding path is:
 
 1. Add this repo as a flake input in the user's own flake.
@@ -120,7 +159,7 @@ sudo nixos-rebuild switch --flake .#node-1
 systemctl status noda
 ```
 
-See the `examples/nix-native-enrollment` example for a minimal local setup.
+See the `examples/nix-native-enrollment` example for a minimal node setup.
 
 ## API surface
 
