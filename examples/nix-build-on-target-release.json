@@ -2,48 +2,36 @@
   "version": "bootstrap-agent-1",
   "manifest": {
     "target_type": "edge-linux-aarch64",
-    "artifact": {
-      "url": "file:///home/aryanp/noda/README.md",
-      "sha256": null,
-      "headers": {}
-    },
-    "install": {
-      "install_type": "nix-generation",
-      "executor": "nix-generation",
-      "slot_pair": ["A", "B"],
-      "install_command": null,
-      "install_args": [],
-      "nix_generation": {
-        "source_path": "/home/aryanp/noda",
-        "flake_attr": "nixosConfigurations.ota-vm.config.system.build.toplevel",
-        "expected_hostname": "ota-vm",
-        "validation_timeout_seconds": 900
+    "executor": {
+      "kind": "nix_generation",
+      "source": {
+        "kind": "build_flake",
+        "flake": "/home/aryanp/noda",
+        "flake_attr": "nixosConfigurations.ota-vm.config.system.build.toplevel"
       }
     },
-    "activation": {
-      "activation_type": "reboot",
-      "bootloader": "systemd-boot",
-      "activate_command": null
+    "validation": {
+      "expected_hostname": "ota-vm",
+      "timeout_seconds": 900,
+      "health_checks": [
+        {
+          "name": "noda-active",
+          "kind": "command_exit_zero",
+          "command": "systemctl is-active noda"
+        },
+        {
+          "name": "display-manager-active",
+          "kind": "command_exit_zero",
+          "command": "systemctl is-active display-manager"
+        }
+      ]
     },
     "rollback": {
       "automatic": true,
       "on_boot_failure": true,
-      "on_health_failure": true,
-      "rollback_command": null,
+      "on_validation_failure": true,
       "candidate_timeout_seconds": 900
     },
-    "health_checks": [
-      {
-        "name": "noda-active",
-        "kind": "command_exit_zero",
-        "command": "systemctl is-active noda"
-      },
-      {
-        "name": "display-manager-active",
-        "kind": "command_exit_zero",
-        "command": "systemctl is-active display-manager"
-      }
-    ],
     "labels": {
       "track": "test"
     }

@@ -1,4 +1,4 @@
-# Nix-native FOTA enrollment
+# Nix-native NODA enrollment
 
 This example shows the intended onboarding path for NixOS-managed nodes:
 
@@ -7,4 +7,4 @@ This example shows the intended onboarding path for NixOS-managed nodes:
 3. Enable `services.noda`.
 4. Rebuild the host once.
 
-Keep your existing hardware and host-specific modules in your own flake. `node-1.nix` only shows the FOTA-specific enrollment settings.
+Keep your existing hardware and host-specific modules in your own flake. `node-1.nix` only shows the NODA-specific enrollment settings.

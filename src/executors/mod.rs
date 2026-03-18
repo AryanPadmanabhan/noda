@@ -1,4 +1,7 @@
-use crate::types::{NixGenerationConfig, ReleaseManifest};
+use crate::types::{
+    ArtifactSource, ExecutorSpec, GrubAbExecutorSpec, NixGenerationExecutorSpec, NixGenerationSource,
+    ReleaseManifest, ScriptedExecutorSpec,
+};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,7 +14,7 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub command_id: String,
-    pub artifact_path: PathBuf,
+    pub artifact_path: Option<PathBuf>,
     pub current_slot: String,
     pub next_slot: String,
     pub manifest: ReleaseManifest,
@@ -28,8 +31,6 @@ pub enum ActivationOutcome {
 #[derive(Debug, Clone)]
 pub struct PendingReboot {
     pub expected_system_path: Option<String>,
-    pub expected_hostname: Option<String>,
-    pub validation_timeout_seconds: u64,
 }
 
 pub trait Executor: Send + Sync {
@@ -37,12 +38,12 @@ pub trait Executor: Send + Sync {
     fn activate<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActivationOutcome>> + Send + 'a>>;
 }
 
-pub fn build(name: &str) -> Box<dyn Executor> {
-    match name {
-        "scripted" => Box::new(ScriptedExecutor),
-        "grub-ab" => Box::new(GrubAbExecutor),
-        "nix-generation" => Box::new(NixGenerationExecutor),
-        _ => Box::new(NoopExecutor),
+pub fn build(spec: &ExecutorSpec) -> Box<dyn Executor> {
+    match spec {
+        ExecutorSpec::Scripted(_) => Box::new(ScriptedExecutor),
+        ExecutorSpec::GrubAb(_) => Box::new(GrubAbExecutor),
+        ExecutorSpec::NixGeneration(_) => Box::new(NixGenerationExecutor),
+        ExecutorSpec::Noop => Box::new(NoopExecutor),
     }
 }
 
@@ -61,16 +62,16 @@ struct ScriptedExecutor;
 impl Executor for ScriptedExecutor {
     fn install<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(cmd) = &ctx.manifest.install.install_command {
-                run_shell(cmd, &shell_env(ctx, &[]))?;
-            }
+            let spec = scripted_spec(ctx)?;
+            run_shell(&spec.install_command, &shell_env(ctx, &[]))?;
             Ok(())
         })
     }
 
     fn activate<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActivationOutcome>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(cmd) = &ctx.manifest.activation.activate_command {
+            let spec = scripted_spec(ctx)?;
+            if let Some(cmd) = &spec.activate_command {
                 run_shell(cmd, &shell_env(ctx, &[]))?;
             }
             Ok(ActivationOutcome::Complete)
@@ -84,15 +85,20 @@ impl Executor for GrubAbExecutor {
         Box::pin(async move {
             let slots_dir = ctx.state_dir.join("slots");
             fs::create_dir_all(&slots_dir)?;
+            let artifact_path = ctx
+                .artifact_path
+                .as_ref()
+                .context("grub-ab requires a downloaded artifact path")?;
             let dest = slots_dir.join(format!("slot-{}-{}", ctx.next_slot, ctx.release_version));
-            fs::copy(&ctx.artifact_path, &dest).with_context(|| format!("copying artifact into inactive slot {:?}", dest))?;
+            fs::copy(artifact_path, &dest).with_context(|| format!("copying artifact into inactive slot {:?}", dest))?;
             Ok(())
         })
     }
 
     fn activate<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActivationOutcome>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(cmd) = &ctx.manifest.activation.activate_command {
+            let spec = grub_ab_spec(ctx)?;
+            if let Some(cmd) = &spec.activate_command {
                 run_shell(cmd, &shell_env(ctx, &[]))?;
             } else {
                 fs::write(ctx.state_dir.join("next-boot-slot"), &ctx.next_slot)?;
@@ -106,26 +112,9 @@ struct NixGenerationExecutor;
 impl Executor for NixGenerationExecutor {
     fn install<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let cfg = nix_cfg(ctx)?;
-            let flake_ref = flake_ref(ctx, cfg);
-            let extra = [
-                ("NIX_FLAKE_REF", flake_ref.clone()),
-                ("NIX_FLAKE_ATTR", cfg.flake_attr.clone().unwrap_or_default()),
-            ];
-
-            let built_system = if let Some(store_path) = &cfg.store_path {
-                let copy_from = cfg
-                    .copy_from
-                    .as_ref()
-                    .context("missing install.nix_generation.copy_from for store-path import")?;
-                let extra = [
-                    ("NIX_COPY_FROM", copy_from.clone()),
-                    ("NIX_STORE_PATH", store_path.clone()),
-                ];
-                let env = shell_env(ctx, &extra);
-                if let Some(cmd) = &cfg.copy_command {
-                    run_shell(cmd, &env)?;
-                } else {
+            let spec = nix_spec(ctx)?;
+            let system_path = match &spec.source {
+                NixGenerationSource::CopyFromStore { copy_from, store_path } => {
                     let status = Command::new("nix")
                         .args(["copy", "--from", copy_from, store_path])
                         .status()
@@ -133,106 +122,91 @@ impl Executor for NixGenerationExecutor {
                     if !status.success() {
                         return Err(anyhow!("nix copy failed for {store_path} from {copy_from}"));
                     }
+                    store_path.clone()
                 }
-                store_path.clone()
-            } else if let Some(cmd) = &cfg.build_command {
-                let stdout = run_shell_capture(cmd, &shell_env(ctx, &extra))?;
-                parse_system_path(&stdout)?
-            } else {
-                let target = if let Some(attr) = &cfg.flake_attr {
-                    format!("{flake_ref}#{attr}")
-                } else {
-                    flake_ref
-                };
-                let output = Command::new("nix")
-                    .args(["build", "--no-link", "--print-out-paths", &target])
-                    .output()
-                    .with_context(|| format!("running nix build for {target}"))?;
-                if !output.status.success() {
-                    return Err(anyhow!(
-                        "nix build failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+                NixGenerationSource::BuildFlake { flake, flake_attr } => {
+                    let target = format!("{flake}#{flake_attr}");
+                    let output = Command::new("nix")
+                        .args(["build", "--no-link", "--print-out-paths", &target])
+                        .output()
+                        .with_context(|| format!("running nix build for {target}"))?;
+                    if !output.status.success() {
+                        return Err(anyhow!(
+                            "nix build failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ));
+                    }
+                    parse_system_path(&String::from_utf8_lossy(&output.stdout))?
                 }
-                parse_system_path(&String::from_utf8_lossy(&output.stdout))?
             };
 
-            let metadata = NixBuildMetadata {
-                system_path: cfg.expected_system_path.clone().unwrap_or(built_system),
-            };
-            save_nix_build_metadata(ctx, &metadata)?;
+            save_nix_build_metadata(ctx, &NixBuildMetadata { system_path })?;
             Ok(())
         })
     }
 
     fn activate<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActivationOutcome>> + Send + 'a>> {
         Box::pin(async move {
-            let cfg = nix_cfg(ctx)?;
+            let spec = nix_spec(ctx)?;
             let metadata = load_nix_build_metadata(ctx)?;
-            let extra = [("EXPECTED_SYSTEM_PATH", metadata.system_path.clone())];
-            let env = shell_env(ctx, &extra);
 
-            if let Some(cmd) = &cfg.boot_command {
-                run_shell(cmd, &env)?;
-            } else if cfg.store_path.is_some() {
-                let status = Command::new("nix-env")
-                    .args(["-p", "/nix/var/nix/profiles/system", "--set", &metadata.system_path])
-                    .status()
-                    .with_context(|| format!("registering system profile for {}", metadata.system_path))?;
-                if !status.success() {
-                    return Err(anyhow!("nix-env --set failed for {}", metadata.system_path));
+            match &spec.source {
+                NixGenerationSource::CopyFromStore { .. } => {
+                    let status = Command::new("nix-env")
+                        .args(["-p", "/nix/var/nix/profiles/system", "--set", &metadata.system_path])
+                        .status()
+                        .with_context(|| format!("registering system profile for {}", metadata.system_path))?;
+                    if !status.success() {
+                        return Err(anyhow!("nix-env --set failed for {}", metadata.system_path));
+                    }
+                    let switch_to_configuration = Path::new(&metadata.system_path).join("bin/switch-to-configuration");
+                    let status = Command::new(&switch_to_configuration)
+                        .arg("boot")
+                        .status()
+                        .with_context(|| format!("running {}", switch_to_configuration.display()))?;
+                    if !status.success() {
+                        return Err(anyhow!(
+                            "switch-to-configuration boot failed for {}",
+                            metadata.system_path
+                        ));
+                    }
                 }
-                let switch_to_configuration = Path::new(&metadata.system_path).join("bin/switch-to-configuration");
-                let status = Command::new(&switch_to_configuration)
-                    .arg("boot")
-                    .status()
-                    .with_context(|| format!("running {}", switch_to_configuration.display()))?;
-                if !status.success() {
-                    return Err(anyhow!(
-                        "switch-to-configuration boot failed for {}",
-                        metadata.system_path
-                    ));
-                }
-            } else if let Some(config_name) = nixos_config_name(cfg) {
-                let flake = flake_ref(ctx, cfg);
-                let flake_target = format!("{flake}#{config_name}");
-                let status = Command::new("nixos-rebuild")
-                    .args(["boot", "--flake", &flake_target])
-                    .status()
-                    .with_context(|| format!("running nixos-rebuild boot for {flake_target}"))?;
-                if !status.success() {
-                    return Err(anyhow!("nixos-rebuild boot failed for {flake_target}"));
-                }
-            } else {
-                let switch_to_configuration = Path::new(&metadata.system_path).join("bin/switch-to-configuration");
-                let status = Command::new(&switch_to_configuration)
-                    .arg("boot")
-                    .status()
-                    .with_context(|| format!("running {}", switch_to_configuration.display()))?;
-                if !status.success() {
-                    return Err(anyhow!(
-                        "switch-to-configuration boot failed for {}",
-                        metadata.system_path
-                    ));
+                NixGenerationSource::BuildFlake { flake, flake_attr } => {
+                    if let Some(config_name) = nixos_config_name(flake_attr) {
+                        let flake_target = format!("{flake}#{config_name}");
+                        let status = Command::new("nixos-rebuild")
+                            .args(["boot", "--flake", &flake_target])
+                            .status()
+                            .with_context(|| format!("running nixos-rebuild boot for {flake_target}"))?;
+                        if !status.success() {
+                            return Err(anyhow!("nixos-rebuild boot failed for {flake_target}"));
+                        }
+                    } else {
+                        let switch_to_configuration = Path::new(&metadata.system_path).join("bin/switch-to-configuration");
+                        let status = Command::new(&switch_to_configuration)
+                            .arg("boot")
+                            .status()
+                            .with_context(|| format!("running {}", switch_to_configuration.display()))?;
+                        if !status.success() {
+                            return Err(anyhow!(
+                                "switch-to-configuration boot failed for {}",
+                                metadata.system_path
+                            ));
+                        }
+                    }
                 }
             }
 
-            if let Some(cmd) = &cfg.reboot_command {
-                run_shell(cmd, &env)?;
-            } else {
-                let status = Command::new("systemctl")
-                    .arg("reboot")
-                    .status()
-                    .context("requesting reboot via systemctl")?;
-                if !status.success() {
-                    return Err(anyhow!("systemctl reboot failed"));
-                }
+            let status = Command::new("systemctl")
+                .arg("reboot")
+                .status()
+                .context("requesting reboot via systemctl")?;
+            if !status.success() {
+                return Err(anyhow!("systemctl reboot failed"));
             }
 
             Ok(ActivationOutcome::AwaitReboot(PendingReboot {
                 expected_system_path: Some(metadata.system_path),
-                expected_hostname: cfg.expected_hostname.clone(),
-                validation_timeout_seconds: cfg.validation_timeout_seconds.unwrap_or(900),
             }))
         })
     }
@@ -243,23 +217,28 @@ struct NixBuildMetadata {
     system_path: String,
 }
 
-fn nix_cfg<'a>(ctx: &'a ExecutionContext) -> Result<&'a NixGenerationConfig> {
-    ctx.manifest
-        .install
-        .nix_generation
-        .as_ref()
-        .context("missing install.nix_generation for nix-generation executor")
+fn scripted_spec(ctx: &ExecutionContext) -> Result<&ScriptedExecutorSpec> {
+    match &ctx.manifest.executor {
+        ExecutorSpec::Scripted(spec) => Ok(spec),
+        _ => Err(anyhow!("executor mismatch: expected scripted")),
+    }
 }
 
-fn flake_ref(ctx: &ExecutionContext, cfg: &NixGenerationConfig) -> String {
-    cfg.flake
-        .clone()
-        .or_else(|| cfg.source_path.clone())
-        .unwrap_or_else(|| ctx.artifact_path.display().to_string())
+fn grub_ab_spec(ctx: &ExecutionContext) -> Result<&GrubAbExecutorSpec> {
+    match &ctx.manifest.executor {
+        ExecutorSpec::GrubAb(spec) => Ok(spec),
+        _ => Err(anyhow!("executor mismatch: expected grub-ab")),
+    }
 }
 
-fn nixos_config_name(cfg: &NixGenerationConfig) -> Option<String> {
-    let attr = cfg.flake_attr.as_deref()?;
+fn nix_spec(ctx: &ExecutionContext) -> Result<&NixGenerationExecutorSpec> {
+    match &ctx.manifest.executor {
+        ExecutorSpec::NixGeneration(spec) => Ok(spec),
+        _ => Err(anyhow!("executor mismatch: expected nix-generation")),
+    }
+}
+
+fn nixos_config_name(attr: &str) -> Option<String> {
     let trimmed = attr.strip_prefix("nixosConfigurations.")?;
     let (name, suffix) = trimmed.split_once('.')?;
     if suffix == "config.system.build.toplevel" {
@@ -296,9 +275,17 @@ fn parse_system_path(stdout: &str) -> Result<String> {
 }
 
 fn shell_env(ctx: &ExecutionContext, extra: &[(&str, String)]) -> BTreeMap<String, String> {
+    let artifact_path = ctx
+        .artifact_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let artifact_url = artifact_source(&ctx.manifest.executor)
+        .map(|artifact| artifact.url.clone())
+        .unwrap_or_default();
     let mut env = BTreeMap::from([
-        ("ARTIFACT_PATH".into(), ctx.artifact_path.display().to_string()),
-        ("ARTIFACT_URL".into(), ctx.manifest.artifact.url.clone()),
+        ("ARTIFACT_PATH".into(), artifact_path),
+        ("ARTIFACT_URL".into(), artifact_url),
         ("CURRENT_SLOT".into(), ctx.current_slot.clone()),
         ("NEXT_SLOT".into(), ctx.next_slot.clone()),
         ("RELEASE_VERSION".into(), ctx.release_version.clone()),
@@ -310,6 +297,14 @@ fn shell_env(ctx: &ExecutionContext, extra: &[(&str, String)]) -> BTreeMap<Strin
     env
 }
 
+fn artifact_source(spec: &ExecutorSpec) -> Option<&ArtifactSource> {
+    match spec {
+        ExecutorSpec::Scripted(spec) => Some(&spec.artifact),
+        ExecutorSpec::GrubAb(spec) => Some(&spec.artifact),
+        ExecutorSpec::Noop | ExecutorSpec::NixGeneration(_) => None,
+    }
+}
+
 fn run_shell(command: &str, env: &BTreeMap<String, String>) -> Result<()> {
     let mut cmd = Command::new("sh");
     cmd.arg("-lc").arg(command);
@@ -319,18 +314,4 @@ fn run_shell(command: &str, env: &BTreeMap<String, String>) -> Result<()> {
         return Err(anyhow!("command failed: {command}"));
     }
     Ok(())
-}
-
-fn run_shell_capture(command: &str, env: &BTreeMap<String, String>) -> Result<String> {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-lc").arg(command);
-    cmd.envs(env);
-    let output = cmd.output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "command failed: {command}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }

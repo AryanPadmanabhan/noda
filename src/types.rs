@@ -5,103 +5,113 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseManifest {
     pub target_type: String,
-    pub artifact: ArtifactRef,
-    pub install: InstallConfig,
-    pub activation: ActivationConfig,
-    pub rollback: RollbackConfig,
+    pub executor: ExecutorSpec,
     #[serde(default)]
-    pub health_checks: Vec<HealthCheck>,
+    pub validation: ValidationSpec,
+    #[serde(default)]
+    pub rollback: RollbackPolicy,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactRef {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutorSpec {
+    Noop,
+    Scripted(ScriptedExecutorSpec),
+    GrubAb(GrubAbExecutorSpec),
+    NixGeneration(NixGenerationExecutorSpec),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptedExecutorSpec {
+    pub artifact: ArtifactSource,
+    pub install_command: String,
+    #[serde(default)]
+    pub activate_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrubAbExecutorSpec {
+    pub artifact: ArtifactSource,
+    #[serde(default)]
+    pub slot_pair: Option<[String; 2]>,
+    #[serde(default)]
+    pub activate_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NixGenerationExecutorSpec {
+    pub source: NixGenerationSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NixGenerationSource {
+    BuildFlake {
+        flake: String,
+        flake_attr: String,
+    },
+    CopyFromStore {
+        copy_from: String,
+        store_path: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactSource {
     pub url: String,
     pub sha256: Option<String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallConfig {
-    #[serde(default = "default_install_type")]
-    pub install_type: String,
-    #[serde(default = "default_executor")]
-    pub executor: String,
-    #[serde(default)]
-    pub slot_pair: Option<[String; 2]>,
-    #[serde(default)]
-    pub install_command: Option<String>,
-    #[serde(default)]
-    pub install_args: Vec<String>,
-    #[serde(default)]
-    pub nix_generation: Option<NixGenerationConfig>,
-}
-
-fn default_install_type() -> String {
-    "ab-image".into()
-}
-fn default_executor() -> String {
-    "noop".into()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NixGenerationConfig {
-    #[serde(default)]
-    pub flake: Option<String>,
-    #[serde(default)]
-    pub flake_attr: Option<String>,
-    #[serde(default)]
-    pub source_path: Option<String>,
-    #[serde(default)]
-    pub copy_from: Option<String>,
-    #[serde(default)]
-    pub store_path: Option<String>,
-    #[serde(default)]
-    pub copy_command: Option<String>,
-    #[serde(default)]
-    pub build_command: Option<String>,
-    #[serde(default)]
-    pub boot_command: Option<String>,
-    #[serde(default)]
-    pub reboot_command: Option<String>,
-    #[serde(default)]
-    pub expected_system_path: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ValidationSpec {
     #[serde(default)]
     pub expected_hostname: Option<String>,
     #[serde(default)]
-    pub validation_timeout_seconds: Option<u64>,
+    pub expected_system_path: Option<String>,
+    #[serde(default = "default_validation_timeout_secs")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub health_checks: Vec<HealthCheck>,
+}
+
+fn default_validation_timeout_secs() -> u64 {
+    900
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivationConfig {
-    #[serde(default = "default_activation_type")]
-    pub activation_type: String,
-    #[serde(default)]
-    pub bootloader: Option<String>,
-    #[serde(default)]
-    pub activate_command: Option<String>,
-}
-fn default_activation_type() -> String {
-    "bootloader-switch".into()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RollbackConfig {
+pub struct RollbackPolicy {
     #[serde(default = "default_true")]
     pub automatic: bool,
     #[serde(default = "default_true")]
     pub on_boot_failure: bool,
     #[serde(default = "default_true")]
-    pub on_health_failure: bool,
-    #[serde(default)]
-    pub rollback_command: Option<String>,
+    pub on_validation_failure: bool,
     #[serde(default = "default_timeout_secs")]
     pub candidate_timeout_seconds: u64,
 }
-fn default_true() -> bool { true }
-fn default_timeout_secs() -> u64 { 900 }
+
+impl Default for RollbackPolicy {
+    fn default() -> Self {
+        Self {
+            automatic: true,
+            on_boot_failure: true,
+            on_validation_failure: true,
+            candidate_timeout_seconds: default_timeout_secs(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_timeout_secs() -> u64 {
+    900
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheck {
@@ -147,7 +157,7 @@ pub struct Selector {
     pub mission_states: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RolloutStrategy {
     #[serde(default)]
     pub canary: usize,
@@ -160,9 +170,18 @@ pub struct RolloutStrategy {
     #[serde(default)]
     pub require_idle: bool,
 }
-fn default_batch_size() -> usize { 10 }
-fn default_max_parallel() -> usize { 5 }
-fn default_failure_rate() -> f64 { 0.10 }
+
+fn default_batch_size() -> usize {
+    10
+}
+
+fn default_max_parallel() -> usize {
+    5
+}
+
+fn default_failure_rate() -> f64 {
+    0.10
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateDeploymentRequest {

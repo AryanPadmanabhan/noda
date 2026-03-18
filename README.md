@@ -196,32 +196,30 @@ See the `examples/nix-native-enrollment` example for a minimal node setup.
   "version": "2.4.1",
   "manifest": {
     "target_type": "edge-linux-x86",
-    "artifact": {
-      "url": "https://customer-store.example.com/releases/edge-2.4.1.img.zst",
-      "sha256": "..."
-    },
-    "install": {
-      "install_type": "ab-image",
-      "executor": "grub-ab",
+    "executor": {
+      "kind": "grub_ab",
+      "artifact": {
+        "url": "https://customer-store.example.com/releases/edge-2.4.1.img.zst",
+        "sha256": "...",
+        "headers": {}
+      },
       "slot_pair": ["A", "B"]
     },
-    "activation": {
-      "activation_type": "bootloader-switch",
-      "bootloader": "grub"
+    "validation": {
+      "health_checks": [
+        {
+          "name": "service-ready",
+          "kind": "command_exit_zero",
+          "command": "systemctl is-active my-service"
+        }
+      ]
     },
     "rollback": {
       "automatic": true,
       "on_boot_failure": true,
-      "on_health_failure": true,
+      "on_validation_failure": true,
       "candidate_timeout_seconds": 900
-    },
-    "health_checks": [
-      {
-        "name": "service-ready",
-        "kind": "command_exit_zero",
-        "command": "systemctl is-active my-service"
-      }
-    ]
+    }
   }
 }
 ```

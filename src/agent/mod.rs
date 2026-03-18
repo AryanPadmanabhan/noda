@@ -266,29 +266,26 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
         release = %cmd.release_version,
         "executing command"
     );
-    let artifact_path = if uses_nix_copy_artifact(&cmd.manifest) {
-        PathBuf::from(cmd.manifest.artifact.url.clone())
+    let artifact_path = if let Some(artifact) = artifact_source(&cmd.manifest.executor) {
+        let path = download_artifact(client, &cfg.state_dir, artifact).await?;
+        verify_sha256(&path, artifact.sha256.as_deref())?;
+        Some(path)
     } else {
-        let path = download_artifact(client, &cfg.state_dir, &cmd.manifest.artifact).await?;
-        verify_sha256(&path, cmd.manifest.artifact.sha256.as_deref())?;
-        path
+        None
     };
 
     let mut state = load_state(&cfg.state_dir)?;
-    let executor = executors::build(&cmd.manifest.install.executor);
+    let executor = executors::build(&cmd.manifest.executor);
     let current_slot = state.active_slot.clone().unwrap_or_else(|| {
-        cmd.manifest
-            .install
-            .slot_pair
-            .as_ref()
+        slot_pair(&cmd.manifest.executor)
             .map(|s| s[0].clone())
             .unwrap_or_else(|| "A".into())
     });
-    let next_slot = compute_next_slot(&current_slot, &cmd.manifest.install.slot_pair);
+    let next_slot = compute_next_slot(&current_slot, slot_pair(&cmd.manifest.executor));
 
     let ctx = executors::ExecutionContext {
         command_id: cmd.id.clone(),
-        artifact_path: artifact_path.clone(),
+        artifact_path,
         current_slot: current_slot.clone(),
         next_slot: next_slot.clone(),
         manifest: cmd.manifest.clone(),
@@ -300,7 +297,7 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
     let activation = executor.activate(&ctx).await?;
     match activation {
         executors::ActivationOutcome::Complete => {
-            run_health_checks(client, &cmd.manifest.health_checks).await?;
+            run_health_checks(client, &cmd.manifest.validation.health_checks).await?;
             state.current_version = Some(cmd.release_version.clone());
             state.active_slot = Some(next_slot);
             Ok(CommandExecution::Completed {
@@ -314,28 +311,38 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
                 deployment_id: cmd.deployment_id.clone(),
                 release_id: cmd.release_id.clone(),
                 release_version: cmd.release_version.clone(),
-                expected_system_path: pending.expected_system_path,
-                expected_hostname: pending.expected_hostname,
+                expected_system_path: pending
+                    .expected_system_path
+                    .or_else(|| cmd.manifest.validation.expected_system_path.clone()),
+                expected_hostname: cmd.manifest.validation.expected_hostname.clone(),
                 next_active_slot: Some(next_slot),
-                health_checks: cmd.manifest.health_checks.clone(),
+                health_checks: cmd.manifest.validation.health_checks.clone(),
                 deadline: Utc::now()
-                    + ChronoDuration::seconds(i64::try_from(pending.validation_timeout_seconds).unwrap_or(900)),
+                    + ChronoDuration::seconds(
+                        i64::try_from(cmd.manifest.validation.timeout_seconds).unwrap_or(900),
+                    ),
             });
             Ok(CommandExecution::Deferred { state })
         }
     }
 }
 
-fn uses_nix_copy_artifact(manifest: &ReleaseManifest) -> bool {
-    manifest
-        .install
-        .nix_generation
-        .as_ref()
-        .and_then(|cfg| cfg.copy_from.as_ref().zip(cfg.store_path.as_ref()))
-        .is_some()
+fn artifact_source(executor: &ExecutorSpec) -> Option<&ArtifactSource> {
+    match executor {
+        ExecutorSpec::Scripted(spec) => Some(&spec.artifact),
+        ExecutorSpec::GrubAb(spec) => Some(&spec.artifact),
+        ExecutorSpec::Noop | ExecutorSpec::NixGeneration(_) => None,
+    }
 }
 
-fn compute_next_slot(current: &str, pair: &Option<[String; 2]>) -> String {
+fn slot_pair(executor: &ExecutorSpec) -> Option<&[String; 2]> {
+    match executor {
+        ExecutorSpec::GrubAb(spec) => spec.slot_pair.as_ref(),
+        ExecutorSpec::Noop | ExecutorSpec::Scripted(_) | ExecutorSpec::NixGeneration(_) => None,
+    }
+}
+
+fn compute_next_slot(current: &str, pair: Option<&[String; 2]>) -> String {
     if let Some([a, b]) = pair {
         if current == a {
             b.clone()
@@ -349,7 +356,7 @@ fn compute_next_slot(current: &str, pair: &Option<[String; 2]>) -> String {
     }
 }
 
-async fn download_artifact(client: &Client, state_dir: &Path, artifact: &ArtifactRef) -> Result<PathBuf> {
+async fn download_artifact(client: &Client, state_dir: &Path, artifact: &ArtifactSource) -> Result<PathBuf> {
     let artifact_dir = state_dir.join("artifacts");
     fs::create_dir_all(&artifact_dir)?;
     let url = Url::parse(&artifact.url)?;

@@ -251,6 +251,41 @@ fn make_artifact(root: &Path, name: &str, contents: &[u8]) -> (PathBuf, String) 
     (path, format!("{:x}", digest))
 }
 
+fn write_executable(path: &Path, contents: &str) {
+    fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+}
+
+fn prepare_switch_to_configuration(system_path: &Path, current_system_link: &Path) {
+    let bin_dir = system_path.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"boot\" ]; then\n  ln -sfn '{}' '{}'\nfi\nexit 0\n",
+        system_path.display(),
+        current_system_link.display()
+    );
+    write_executable(&bin_dir.join("switch-to-configuration"), &script);
+}
+
+fn prepare_fake_nix_commands(root: &Path, build_output: &Path) -> PathBuf {
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let nix_script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"build\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nif [ \"$1\" = \"copy\" ]; then\n  exit 0\nfi\nexit 1\n",
+        build_output.display()
+    );
+    write_executable(&fake_bin.join("nix"), &nix_script);
+    write_executable(&fake_bin.join("nix-env"), "#!/bin/sh\nexit 0\n");
+    write_executable(&fake_bin.join("systemctl"), "#!/bin/sh\nexit 0\n");
+    fake_bin
+}
+
 async fn create_release(
     env: &TestEnv,
     version: &str,
@@ -260,35 +295,32 @@ async fn create_release(
     executor: &str,
     health_checks: Vec<Value>,
 ) -> ReleaseRecord {
+    let executor_kind = match executor {
+        "grub-ab" => "grub_ab",
+        other => other,
+    };
     let body = json!({
         "version": version,
         "manifest": {
             "target_type": target_type,
-            "artifact": {
-                "url": artifact_url,
-                "sha256": sha256,
-                "headers": {}
+            "executor": {
+                "kind": executor_kind,
+                "artifact": {
+                    "url": artifact_url,
+                    "sha256": sha256,
+                    "headers": {}
+                },
+                "slot_pair": ["A", "B"]
             },
-            "install": {
-                "install_type": "ab-image",
-                "executor": executor,
-                "slot_pair": ["A", "B"],
-                "install_command": Value::Null,
-                "install_args": []
-            },
-            "activation": {
-                "activation_type": "bootloader-switch",
-                "bootloader": "grub",
-                "activate_command": Value::Null
+            "validation": {
+                "health_checks": health_checks
             },
             "rollback": {
                 "automatic": true,
                 "on_boot_failure": true,
-                "on_health_failure": true,
-                "rollback_command": Value::Null,
+                "on_validation_failure": true,
                 "candidate_timeout_seconds": 900
             },
-            "health_checks": health_checks,
             "labels": {"track": "test"}
         }
     });
@@ -797,29 +829,25 @@ async fn scripted_executor_exports_artifact_env_vars() {
         "7.0.0",
         json!({
             "target_type": "edge-linux-x86",
-            "artifact": {
-                "url": Url::from_file_path(&artifact_path).unwrap().to_string(),
-                "sha256": sha256,
-                "headers": {}
-            },
-            "install": {
-                "install_type": "scripted",
-                "executor": "scripted",
+            "executor": {
+                "kind": "scripted",
+                "artifact": {
+                    "url": Url::from_file_path(&artifact_path).unwrap().to_string(),
+                    "sha256": sha256,
+                    "headers": {}
+                },
                 "install_command": install_command,
-                "install_args": []
-            },
-            "activation": {
-                "activation_type": "none",
                 "activate_command": Value::Null
+            },
+            "validation": {
+                "health_checks": [always_pass_check()]
             },
             "rollback": {
                 "automatic": true,
                 "on_boot_failure": true,
-                "on_health_failure": true,
-                "rollback_command": Value::Null,
+                "on_validation_failure": true,
                 "candidate_timeout_seconds": 900
             },
-            "health_checks": [always_pass_check()],
             "labels": {"track": "test"}
         }),
     )
@@ -865,9 +893,12 @@ async fn nix_generation_command_completes_after_agent_restart_and_validation() {
     .await;
     let current_system_link = env.root.join("current-system");
     let baseline_system = env.root.join("systems").join("baseline");
+    let built_system = env.root.join("systems").join("built-8.0.0");
     fs::create_dir_all(&baseline_system).unwrap();
+    prepare_switch_to_configuration(&built_system, &current_system_link);
     #[cfg(unix)]
     std::os::unix::fs::symlink(&baseline_system, &current_system_link).unwrap();
+    let fake_bin = prepare_fake_nix_commands(&env.root, &built_system);
 
     let replacement = env.agents.pop().unwrap();
     drop(replacement);
@@ -878,45 +909,39 @@ async fn nix_generation_command_completes_after_agent_restart_and_validation() {
         "edge-linux-x86",
         "idle",
         &["region=lab"],
-        &[(
-            "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
-            current_system_link.to_str().unwrap(),
-        )],
+        &[
+            (
+                "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
+                current_system_link.to_str().unwrap(),
+            ),
+            ("PATH", &format!("{}:/usr/bin:/bin", fake_bin.display())),
+        ],
     ));
 
-    let (artifact_path, sha256) = make_artifact(&env.root, "artifact-nix.bin", b"nix-generation");
     let release = create_release_from_manifest(
         &env,
         "8.0.0",
         json!({
             "target_type": "edge-linux-x86",
-            "artifact": {
-                "url": Url::from_file_path(&artifact_path).unwrap().to_string(),
-                "sha256": sha256,
-                "headers": {}
-            },
-            "install": {
-                "install_type": "nix-generation",
-                "executor": "nix-generation",
-                "slot_pair": ["A", "B"],
-                "nix_generation": {
-                    "build_command": "target=\"$STATE_DIR/systems/$RELEASE_VERSION\"; mkdir -p \"$target/bin\"; printf '%s\n' \"$target\"",
-                    "boot_command": "ln -sfn \"$EXPECTED_SYSTEM_PATH\" \"$DEPLOY_INTENT_CURRENT_SYSTEM_LINK\"",
-                    "reboot_command": "true",
-                    "validation_timeout_seconds": 60
+            "executor": {
+                "kind": "nix_generation",
+                "source": {
+                    "kind": "build_flake",
+                    "flake": env.root.display().to_string(),
+                    "flake_attr": "packages.fake-system"
                 }
             },
-            "activation": {
-                "activation_type": "reboot"
+            "validation": {
+                "expected_system_path": built_system.display().to_string(),
+                "timeout_seconds": 60,
+                "health_checks": [always_pass_check()]
             },
             "rollback": {
                 "automatic": true,
                 "on_boot_failure": true,
-                "on_health_failure": true,
-                "rollback_command": Value::Null,
+                "on_validation_failure": true,
                 "candidate_timeout_seconds": 900
             },
-            "health_checks": [always_pass_check()],
             "labels": {"track": "test"}
         }),
     )
@@ -962,10 +987,13 @@ async fn nix_generation_command_completes_after_agent_restart_and_validation() {
         "edge-linux-x86",
         "idle",
         &["region=lab"],
-        &[(
-            "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
-            current_system_link.to_str().unwrap(),
-        )],
+        &[
+            (
+                "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
+                current_system_link.to_str().unwrap(),
+            ),
+            ("PATH", &format!("{}:/usr/bin:/bin", fake_bin.display())),
+        ],
     ));
 
     wait_until(Duration::from_secs(20), || {
@@ -991,9 +1019,12 @@ async fn nix_generation_copy_mode_completes_after_restart_and_validation() {
     .await;
     let current_system_link = env.root.join("current-system-copy");
     let baseline_system = env.root.join("systems").join("baseline-copy");
+    let imported_system = env.root.join("imported-store").join("gui-restore-2");
     fs::create_dir_all(&baseline_system).unwrap();
+    prepare_switch_to_configuration(&imported_system, &current_system_link);
     #[cfg(unix)]
     std::os::unix::fs::symlink(&baseline_system, &current_system_link).unwrap();
+    let fake_bin = prepare_fake_nix_commands(&env.root, &env.root.join("unused-build-output"));
 
     let replacement = env.agents.pop().unwrap();
     drop(replacement);
@@ -1004,48 +1035,39 @@ async fn nix_generation_copy_mode_completes_after_restart_and_validation() {
         "edge-linux-x86",
         "idle",
         &["region=lab"],
-        &[(
-            "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
-            current_system_link.to_str().unwrap(),
-        )],
+        &[
+            (
+                "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
+                current_system_link.to_str().unwrap(),
+            ),
+            ("PATH", &format!("{}:/usr/bin:/bin", fake_bin.display())),
+        ],
     ));
 
-    let imported_system = env.root.join("imported-store").join("gui-restore-2");
-    let artifact_ref = format!("nix-store://{}", imported_system.display());
     let release = create_release_from_manifest(
         &env,
         "8.1.0",
         json!({
             "target_type": "edge-linux-x86",
-            "artifact": {
-                "url": artifact_ref,
-                "sha256": Value::Null,
-                "headers": {}
-            },
-            "install": {
-                "install_type": "nix-generation",
-                "executor": "nix-generation",
-                "slot_pair": ["A", "B"],
-                "nix_generation": {
+            "executor": {
+                "kind": "nix_generation",
+                "source": {
+                    "kind": "copy_from_store",
                     "copy_from": "ssh://builder@example",
-                    "store_path": imported_system.display().to_string(),
-                    "copy_command": "mkdir -p \"$NIX_STORE_PATH/bin\"",
-                    "boot_command": "ln -sfn \"$EXPECTED_SYSTEM_PATH\" \"$DEPLOY_INTENT_CURRENT_SYSTEM_LINK\"",
-                    "reboot_command": "true",
-                    "validation_timeout_seconds": 60
+                    "store_path": imported_system.display().to_string()
                 }
             },
-            "activation": {
-                "activation_type": "reboot"
+            "validation": {
+                "expected_system_path": imported_system.display().to_string(),
+                "timeout_seconds": 60,
+                "health_checks": [always_pass_check()]
             },
             "rollback": {
                 "automatic": true,
                 "on_boot_failure": true,
-                "on_health_failure": true,
-                "rollback_command": Value::Null,
+                "on_validation_failure": true,
                 "candidate_timeout_seconds": 900
             },
-            "health_checks": [always_pass_check()],
             "labels": {"track": "test"}
         }),
     )
@@ -1091,10 +1113,13 @@ async fn nix_generation_copy_mode_completes_after_restart_and_validation() {
         "edge-linux-x86",
         "idle",
         &["region=lab"],
-        &[(
-            "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
-            current_system_link.to_str().unwrap(),
-        )],
+        &[
+            (
+                "DEPLOY_INTENT_CURRENT_SYSTEM_LINK",
+                current_system_link.to_str().unwrap(),
+            ),
+            ("PATH", &format!("{}:/usr/bin:/bin", fake_bin.display())),
+        ],
     ));
 
     wait_until(Duration::from_secs(20), || {
