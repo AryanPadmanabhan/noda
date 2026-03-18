@@ -291,8 +291,12 @@ src/
   server/
   types.rs
 examples/
-  create_release.json
-  create_deployment.json
+  basic-release.json
+  basic-deployment.json
+  nix-build-on-target-release.json
+  nix-build-on-target-deployment.json
+  nix-copy-release.json
+  nix-copy-deployment.json
 scripts/
   demo-health.sh
 ```

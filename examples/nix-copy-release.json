@@ -15,7 +15,7 @@
       "install_args": [],
       "nix_generation": {
         "copy_from": "ssh://aryanpaddy@10.2.24.81",
-        "store_path": "/nix/store/7pgsv7h4jmz358dlciz0k4fa5m7qd215-nixos-system-ota-vm-nix-copy-25.11.20260313.3e20095",
+        "store_path": "/nix/store/nhzjppi0w04rhnrfrf8k76gsg0wmff8a-nixos-system-ota-vm-noda-2-25.11.20260314.e9f278f",
         "expected_hostname": "ota-vm",
         "validation_timeout_seconds": 900
       }
