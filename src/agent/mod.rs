@@ -38,7 +38,14 @@ struct LocalState {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum PendingBootPhase {
+    Forward,
+    Rollback,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingBootState {
+    phase: PendingBootPhase,
     command_id: String,
     deployment_id: String,
     release_id: String,
@@ -46,7 +53,12 @@ struct PendingBootState {
     expected_system_path: Option<String>,
     expected_hostname: Option<String>,
     next_active_slot: Option<String>,
+    previous_system_path: Option<String>,
+    previous_hostname: Option<String>,
+    previous_version: Option<String>,
+    previous_active_slot: Option<String>,
     health_checks: Vec<HealthCheck>,
+    rollback: RollbackPolicy,
     deadline: DateTime<Utc>,
 }
 
@@ -132,28 +144,59 @@ async fn resume_pending_boot(client: &Client, cfg: &AgentConfig, state: &mut Loc
 
     match validate_pending_boot(client, &pending).await {
         Ok(()) => {
-            info!(
-                asset_id = %cfg.asset_id,
-                command_id = %pending.command_id,
-                release = %pending.release_version,
-                "post-boot validation succeeded"
-            );
-            state.current_version = Some(pending.release_version.clone());
-            state.active_slot = pending.next_active_slot.clone();
-            state.pending_boot = None;
-            report_result(
-                client,
-                cfg,
-                AgentResultRequest {
-                    command_id: pending.command_id,
-                    asset_id: cfg.asset_id.clone(),
-                    success: true,
-                    message: format!("validated {} after reboot", pending.release_version),
-                    active_slot: state.active_slot.clone(),
-                    booted_version: state.current_version.clone(),
-                },
-            )
-            .await?;
+            match pending.phase {
+                PendingBootPhase::Forward => {
+                    info!(
+                        asset_id = %cfg.asset_id,
+                        command_id = %pending.command_id,
+                        release = %pending.release_version,
+                        "post-boot validation succeeded"
+                    );
+                    state.current_version = Some(pending.release_version.clone());
+                    state.active_slot = pending.next_active_slot.clone();
+                    state.pending_boot = None;
+                    report_result(
+                        client,
+                        cfg,
+                        AgentResultRequest {
+                            command_id: pending.command_id,
+                            asset_id: cfg.asset_id.clone(),
+                            success: true,
+                            message: format!("validated {} after reboot", pending.release_version),
+                            active_slot: state.active_slot.clone(),
+                            booted_version: state.current_version.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                PendingBootPhase::Rollback => {
+                    info!(
+                        asset_id = %cfg.asset_id,
+                        command_id = %pending.command_id,
+                        release = %pending.release_version,
+                        "rollback validation succeeded"
+                    );
+                    state.current_version = pending.previous_version.clone();
+                    state.active_slot = pending.previous_active_slot.clone();
+                    state.pending_boot = None;
+                    report_result(
+                        client,
+                        cfg,
+                        AgentResultRequest {
+                            command_id: pending.command_id,
+                            asset_id: cfg.asset_id.clone(),
+                            success: false,
+                            message: format!(
+                                "post-boot validation failed for {}; rollback succeeded",
+                                pending.release_version
+                            ),
+                            active_slot: state.active_slot.clone(),
+                            booted_version: state.current_version.clone(),
+                        },
+                    )
+                    .await?;
+                }
+            }
         }
         Err(err) if Utc::now() < pending.deadline => {
             warn!(
@@ -164,30 +207,98 @@ async fn resume_pending_boot(client: &Client, cfg: &AgentConfig, state: &mut Loc
             );
         }
         Err(err) => {
-            error!(
-                asset_id = %cfg.asset_id,
-                command_id = %pending.command_id,
-                error = %err,
-                "post-boot validation timed out"
-            );
-            state.pending_boot = None;
-            report_result(
-                client,
-                cfg,
-                AgentResultRequest {
-                    command_id: pending.command_id,
-                    asset_id: cfg.asset_id.clone(),
-                    success: false,
-                    message: format!("post-boot validation failed: {err}"),
-                    active_slot: state.active_slot.clone(),
-                    booted_version: state.current_version.clone(),
-                },
-            )
-            .await?;
+            match pending.phase {
+                PendingBootPhase::Forward if should_attempt_rollback(&pending) => {
+                    let previous_system_path = pending
+                        .previous_system_path
+                        .clone()
+                        .context("missing previous system path for rollback")?;
+                    error!(
+                        asset_id = %cfg.asset_id,
+                        command_id = %pending.command_id,
+                        error = %err,
+                        rollback_to = %previous_system_path,
+                        "post-boot validation failed; starting rollback"
+                    );
+                    executors::rollback_nix_generation(&previous_system_path)?;
+                    state.pending_boot = Some(PendingBootState {
+                        phase: PendingBootPhase::Rollback,
+                        command_id: pending.command_id,
+                        deployment_id: pending.deployment_id,
+                        release_id: pending.release_id,
+                        release_version: pending.release_version,
+                        expected_system_path: Some(previous_system_path),
+                        expected_hostname: pending.previous_hostname,
+                        next_active_slot: pending.next_active_slot,
+                        previous_system_path: pending.previous_system_path,
+                        previous_hostname: None,
+                        previous_version: pending.previous_version,
+                        previous_active_slot: pending.previous_active_slot,
+                        health_checks: pending.health_checks,
+                        rollback: pending.rollback.clone(),
+                        deadline: Utc::now()
+                            + ChronoDuration::seconds(
+                                i64::try_from(pending.rollback.candidate_timeout_seconds).unwrap_or(900),
+                            ),
+                    });
+                }
+                PendingBootPhase::Forward => {
+                    error!(
+                        asset_id = %cfg.asset_id,
+                        command_id = %pending.command_id,
+                        error = %err,
+                        "post-boot validation timed out"
+                    );
+                    state.pending_boot = None;
+                    report_result(
+                        client,
+                        cfg,
+                        AgentResultRequest {
+                            command_id: pending.command_id,
+                            asset_id: cfg.asset_id.clone(),
+                            success: false,
+                            message: format!("post-boot validation failed: {err}"),
+                            active_slot: state.active_slot.clone(),
+                            booted_version: state.current_version.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                PendingBootPhase::Rollback => {
+                    error!(
+                        asset_id = %cfg.asset_id,
+                        command_id = %pending.command_id,
+                        error = %err,
+                        "rollback validation failed"
+                    );
+                    state.pending_boot = None;
+                    report_result(
+                        client,
+                        cfg,
+                        AgentResultRequest {
+                            command_id: pending.command_id,
+                            asset_id: cfg.asset_id.clone(),
+                            success: false,
+                            message: format!(
+                                "post-boot validation failed and rollback failed: {err}"
+                            ),
+                            active_slot: state.active_slot.clone(),
+                            booted_version: state.current_version.clone(),
+                        },
+                    )
+                    .await?;
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn should_attempt_rollback(pending: &PendingBootState) -> bool {
+    pending.rollback.automatic
+        && pending.rollback.on_validation_failure
+        && pending.previous_system_path.is_some()
 }
 
 async fn validate_pending_boot(client: &Client, pending: &PendingBootState) -> Result<()> {
@@ -282,6 +393,18 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
             .unwrap_or_else(|| "A".into())
     });
     let next_slot = compute_next_slot(&current_slot, slot_pair(&cmd.manifest.executor));
+    let previous_system_path = if matches!(cmd.manifest.executor, ExecutorSpec::NixGeneration(_)) {
+        Some(current_system_path()?)
+    } else {
+        None
+    };
+    let previous_hostname = if matches!(cmd.manifest.executor, ExecutorSpec::NixGeneration(_)) {
+        Some(current_hostname()?)
+    } else {
+        None
+    };
+    let previous_version = state.current_version.clone();
+    let previous_active_slot = state.active_slot.clone();
 
     let ctx = executors::ExecutionContext {
         command_id: cmd.id.clone(),
@@ -307,6 +430,7 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
         }
         executors::ActivationOutcome::AwaitReboot(pending) => {
             state.pending_boot = Some(PendingBootState {
+                phase: PendingBootPhase::Forward,
                 command_id: cmd.id.clone(),
                 deployment_id: cmd.deployment_id.clone(),
                 release_id: cmd.release_id.clone(),
@@ -316,7 +440,12 @@ async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord
                     .or_else(|| cmd.manifest.validation.expected_system_path.clone()),
                 expected_hostname: cmd.manifest.validation.expected_hostname.clone(),
                 next_active_slot: Some(next_slot),
+                previous_system_path,
+                previous_hostname,
+                previous_version,
+                previous_active_slot,
                 health_checks: cmd.manifest.validation.health_checks.clone(),
+                rollback: cmd.manifest.rollback.clone(),
                 deadline: Utc::now()
                     + ChronoDuration::seconds(
                         i64::try_from(cmd.manifest.validation.timeout_seconds).unwrap_or(900),

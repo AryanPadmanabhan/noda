@@ -1,5 +1,5 @@
 {
-  "release_id": "ac004f17-f88a-46b1-9f71-9b095dc39c8c",
+  "release_id": "0756773c-2e33-4ddb-9047-dc34ca8f3cdd",
   "rollout_name": "ota-vm-artifact-copy",
   "selector": {
     "target_type": "edge-linux-aarch64",

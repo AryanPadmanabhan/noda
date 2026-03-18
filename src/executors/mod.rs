@@ -33,6 +33,38 @@ pub struct PendingReboot {
     pub expected_system_path: Option<String>,
 }
 
+pub fn rollback_nix_generation(previous_system_path: &str) -> Result<()> {
+    let status = Command::new("nix-env")
+        .args(["-p", "/nix/var/nix/profiles/system", "--set", previous_system_path])
+        .status()
+        .with_context(|| format!("registering rollback system profile for {previous_system_path}"))?;
+    if !status.success() {
+        return Err(anyhow!("nix-env --set failed for rollback target {previous_system_path}"));
+    }
+
+    let switch_to_configuration = Path::new(previous_system_path).join("bin/switch-to-configuration");
+    let status = Command::new(&switch_to_configuration)
+        .arg("boot")
+        .status()
+        .with_context(|| format!("running {}", switch_to_configuration.display()))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "switch-to-configuration boot failed for rollback target {}",
+            previous_system_path
+        ));
+    }
+
+    let status = Command::new("systemctl")
+        .arg("reboot")
+        .status()
+        .context("requesting rollback reboot via systemctl")?;
+    if !status.success() {
+        return Err(anyhow!("systemctl reboot failed during rollback"));
+    }
+
+    Ok(())
+}
+
 pub trait Executor: Send + Sync {
     fn install<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
     fn activate<'a>(&'a self, ctx: &'a ExecutionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActivationOutcome>> + Send + 'a>>;

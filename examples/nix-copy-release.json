@@ -1,5 +1,5 @@
 {
-  "version": "artifact-copy-1",
+  "version": "new-testing",
   "manifest": {
     "target_type": "edge-linux-aarch64",
     "executor": {
@@ -7,7 +7,7 @@
       "source": {
         "kind": "copy_from_store",
         "copy_from": "ssh://aryanpaddy@10.2.24.81",
-        "store_path": "/nix/store/nhzjppi0w04rhnrfrf8k76gsg0wmff8a-nixos-system-ota-vm-noda-2-25.11.20260314.e9f278f"
+        "store_path": "/nix/store/gihzh59qkbr8f68ypgmibam5z3sn3kq3-nixos-system-ota-vm-noda-3-25.11.20260314.e9f278f"
       }
     },
     "validation": {
