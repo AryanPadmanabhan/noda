@@ -15,9 +15,12 @@ It is built around three ideas:
 Today the project supports these executor families:
 
 - `nix_generation`
-- `grub_ab`
 - `scripted`
 - `noop`
+
+In the future, I plan to add these executor families: 
+
+- `grub_ab`
 
 The manifest schema is executor-specific. Nix releases only carry Nix fields. A/B releases only carry A/B fields. The old shared "artifact for everything" shape is gone for Nix flows.
 
@@ -46,7 +49,7 @@ At a high level:
 5. The agent reports success or failure.
 6. The server updates deployment and asset state.
 
-## What is production-useful now
+## So far, what can it do? 
 
 - self-hosted control plane
 - label- and target-type-based rollout selection
@@ -56,8 +59,9 @@ At a high level:
 - build-on-target Nix deployments for bootstrap flows
 - post-boot validation
 - automatic rollback for `nix_generation` after validation failure
+- automatic healthchecks for `nix_generation` 
 
-## What is still intentionally incomplete
+## What is still incomplete
 
 - authentication and authorization
 - TLS / reverse-proxy packaging
@@ -65,8 +69,6 @@ At a high level:
 - real bootloader-native `grub_ab` activation and rollback
 - metrics / tracing export
 - formal server install packages outside NixOS
-
-This repo is now much closer to a product core than a demo, but those items still matter before a broad production rollout.
 
 ## Build
 
@@ -79,8 +81,6 @@ cargo build
 ```bash
 cargo run -- server --bind 127.0.0.1:8080 --db noda.db
 ```
-
-The only accepted panic-at-startup boundary is process startup. Runtime request handling and DB access are expected to return errors, not panic.
 
 ## Run an agent
 
@@ -136,7 +136,7 @@ Example:
   services.noda = {
     enable = true;
     package = noda.packages.${pkgs.system}.noda;
-    serverUrl = "http://10.2.24.81:8080";
+    serverUrl = "http://{SERVER_NODE_IP}:{SERVER_PORT}";
     assetId = "node-1";
     assetType = "edge-linux-aarch64";
     missionState = "idle";
@@ -149,7 +149,8 @@ Apply it:
 
 ```bash
 cd /etc/nixos
-sudo nixos-rebuild switch --flake .#node-1
+sudo nixos-rebuild boot --flake .#node-1
+systemctl reboot
 systemctl status noda
 ```
 
@@ -187,7 +188,8 @@ Example:
 Apply it:
 
 ```bash
-sudo nixos-rebuild switch --flake .#control-plane
+sudo nixos-rebuild boot --flake .#control-plane
+systemctl reboot
 systemctl status noda-server
 ```
 
@@ -263,11 +265,11 @@ Example: build on target
       "source": {
         "kind": "build_flake",
         "flake": "/home/aryanp/noda",
-        "flake_attr": "nixosConfigurations.ota-vm.config.system.build.toplevel"
+        "flake_attr": "nixosConfigurations.node-1.config.system.build.toplevel"
       }
     },
     "validation": {
-      "expected_hostname": "ota-vm",
+      "expected_hostname": "node-1",
       "timeout_seconds": 900,
       "health_checks": [
         {
@@ -298,12 +300,12 @@ Example: copy prebuilt system from a store source
       "kind": "nix_generation",
       "source": {
         "kind": "copy_from_store",
-        "copy_from": "ssh://aryanpaddy@10.2.24.81",
-        "store_path": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-ota-vm-..."
+        "copy_from": "ssh://{USERNAME}@{HOST}",
+        "store_path": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-node-1-..."
       }
     },
     "validation": {
-      "expected_hostname": "ota-vm",
+      "expected_hostname": "node-1",
       "timeout_seconds": 900,
       "health_checks": [
         {
@@ -319,7 +321,7 @@ Example: copy prebuilt system from a store source
 
 ### `grub_ab`
 
-`grub_ab` currently stages the artifact into the inactive slot area and can optionally run a user-supplied activation command. It is a scaffolding executor, not a full bootloader-integrated A/B implementation yet.
+`grub_ab` currently stages the artifact into the inactive slot area and can optionally run a user-supplied activation command. It is a scaffolding executor, not a full bootloader-integrated A/B implementation yet. I am still building this. ß
 
 Example:
 
@@ -352,7 +354,8 @@ Example:
 
 ### `scripted`
 
-`scripted` is the escape hatch for integrating with an existing updater. It still accepts shell commands, but it is explicitly isolated to this executor instead of leaking shell fields into every release type.
+`scripted` is the escape hatch for integrating with an existing updater. This is also
+not very supported yet. 
 
 Example:
 
@@ -461,7 +464,7 @@ Use:
 
 This is the artifact-driven Nix path. The node copies a prebuilt `/nix/store/...` system from a reachable store source such as another machine over SSH.
 
-### Generic A/B-style artifact rollout
+### Generic A/B-style artifact rollout (not well supported yet)
 
 Use:
 
@@ -469,21 +472,6 @@ Use:
 - `examples/basic-deployment.json`
 
 This is the minimal non-Nix example in the repo today.
-
-## VM workflow that has been exercised
-
-The repo has already been used in a practical Nix VM flow:
-
-1. bootstrap the VM onto a new `noda` agent
-2. build a new NixOS toplevel
-3. copy the toplevel into a temporary store source
-4. submit a `nix_generation` release with `copy_from_store`
-5. let the node `nix copy --from ...`
-6. reboot into the new system
-7. validate the booted system
-8. trigger rollback on a bad validation configuration
-
-That path is the current strongest demonstrated use case.
 
 ## Repository layout
 
@@ -504,13 +492,6 @@ That path is the current strongest demonstrated use case.
 - `examples/`
   - release/deployment examples and Nix enrollment example
 
-## Development notes
-
-- runtime code in `src/` should not use `unwrap()` / `expect()` / `panic!()` for normal control flow
-- shell-based behavior is confined to the executors that actually require it
-- API handlers return structured JSON errors instead of panicking on poisoned locks
-- the DB layer and executor layer are split into smaller modules to keep growth manageable
-
 ## Verification
 
 Useful local checks:
@@ -520,4 +501,4 @@ cargo check
 cargo test --no-run
 ```
 
-Full `cargo test` starts local test servers and agents. In restricted sandboxes that can fail due local bind permissions even when the code is correct.
+Full `cargo test` starts local test servers and agents. 
