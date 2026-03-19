@@ -3,8 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    env,
-    fs,
+    env, fs,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -31,7 +30,7 @@ struct TestEnv {
     root: PathBuf,
     server_url: String,
     _server: ChildGuard,
-    agents: Vec<ChildGuard>,
+    _agents: Vec<ChildGuard>,
     client: Client,
 }
 
@@ -65,11 +64,7 @@ fn bin_path() -> PathBuf {
         return PathBuf::from(p);
     }
 
-    let exe_name = if cfg!(windows) {
-        "noda.exe"
-    } else {
-        "noda"
-    };
+    let exe_name = if cfg!(windows) { "noda.exe" } else { "noda" };
 
     // Typical integration-test layout: target/debug/deps/<test-binary>
     if let Ok(current) = env::current_exe() {
@@ -99,13 +94,8 @@ fn bin_path() -> PathBuf {
     candidate
 }
 
-
 fn unique_root(name: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!(
-        "noda-tests-{}-{}",
-        name,
-        Uuid::new_v4()
-    ));
+    let dir = env::temp_dir().join(format!("noda-tests-{}-{}", name, Uuid::new_v4()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -162,7 +152,15 @@ fn spawn_agent(
     mission_state: &str,
     labels: &[&str],
 ) -> ChildGuard {
-    spawn_agent_with_env(server_url, root, asset_id, asset_type, mission_state, labels, &[])
+    spawn_agent_with_env(
+        server_url,
+        root,
+        asset_id,
+        asset_type,
+        mission_state,
+        labels,
+        &[],
+    )
 }
 
 fn spawn_agent_with_env(
@@ -228,8 +226,17 @@ async fn test_env(name: &str, agents: &[(&str, &str, &str, Vec<&str>)]) -> TestE
         let server_url = server_url.clone();
         let expected = agents.len();
         async move {
-            let resp = client.get(format!("{server_url}/v1/assets")).send().await.ok()?;
-            let assets = resp.error_for_status().ok()?.json::<Vec<AssetRecord>>().await.ok()?;
+            let resp = client
+                .get(format!("{server_url}/v1/assets"))
+                .send()
+                .await
+                .ok()?;
+            let assets = resp
+                .error_for_status()
+                .ok()?
+                .json::<Vec<AssetRecord>>()
+                .await
+                .ok()?;
             Some(assets.len() == expected)
         }
     })
@@ -239,7 +246,7 @@ async fn test_env(name: &str, agents: &[(&str, &str, &str, Vec<&str>)]) -> TestE
         root,
         server_url,
         _server: server,
-        agents: spawned,
+        _agents: spawned,
         client,
     }
 }
@@ -380,7 +387,10 @@ async fn deployment(env: &TestEnv, deployment_id: &str) -> DeploymentRecord {
 
 async fn targets(env: &TestEnv, deployment_id: &str) -> Vec<DeploymentTargetRecord> {
     env.client
-        .get(format!("{}/v1/deployments/{deployment_id}/targets", env.server_url))
+        .get(format!(
+            "{}/v1/deployments/{deployment_id}/targets",
+            env.server_url
+        ))
         .send()
         .await
         .unwrap()
@@ -501,7 +511,14 @@ async fn ten_agent_update_succeeds() {
     }
     let borrowed: Vec<(&str, &str, &str, Vec<&str>)> = defs
         .iter()
-        .map(|(a, t, m, labels)| (a.as_str(), t.as_str(), m.as_str(), labels.iter().map(String::as_str).collect()))
+        .map(|(a, t, m, labels)| {
+            (
+                a.as_str(),
+                t.as_str(),
+                m.as_str(),
+                labels.iter().map(String::as_str).collect(),
+            )
+        })
         .collect();
     let env = test_env("ten-agent", &borrowed).await;
 
@@ -542,7 +559,9 @@ async fn ten_agent_update_succeeds() {
 
     let asets = assets(&env).await;
     assert_eq!(asets.len(), 10);
-    assert!(asets.iter().all(|a| a.current_version.as_deref() == Some("2.0.0")));
+    assert!(asets
+        .iter()
+        .all(|a| a.current_version.as_deref() == Some("2.0.0")));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -717,13 +736,20 @@ async fn failure_rate_aborts_remaining_rollout() {
     let ts = targets(&env, &deployment_record.id).await;
     let failed = ts.iter().filter(|t| t.state == "failed").count();
     let succeeded = ts.iter().filter(|t| t.state == "succeeded").count();
-    assert_eq!(failed, 1, "expected exactly one failed target before abort: {ts:?}");
+    assert_eq!(
+        failed, 1,
+        "expected exactly one failed target before abort: {ts:?}"
+    );
     assert_eq!(succeeded, 0, "expected no successful targets: {ts:?}");
     assert!(
         ts.iter().filter(|t| t.state == "pending").count() >= 3,
         "expected remaining targets to stay pending after abort: {ts:?}"
     );
-    assert!(ts.iter().find(|t| t.state == "failed").and_then(|t| t.last_error.clone()).is_some());
+    assert!(ts
+        .iter()
+        .find(|t| t.state == "failed")
+        .and_then(|t| t.last_error.clone())
+        .is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -786,9 +812,13 @@ async fn scripted_executor_exports_artifact_env_vars() {
     )
     .await;
 
-    let (artifact_path, sha256) = make_artifact(&env.root, "artifact-scripted.bin", b"scripted-env");
+    let (artifact_path, sha256) =
+        make_artifact(&env.root, "artifact-scripted.bin", b"scripted-env");
     let output_path = env.root.join("scripted-env-output.txt");
-    let install_command = format!("printf '%s|%s|%s' \"$ARTIFACT_PATH\" \"$RELEASE_VERSION\" \"$STATE_DIR\" > {}", output_path.display());
+    let install_command = format!(
+        "printf '%s|%s|%s' \"$ARTIFACT_PATH\" \"$RELEASE_VERSION\" \"$STATE_DIR\" > {}",
+        output_path.display()
+    );
     let release = create_release_from_manifest(
         &env,
         "7.0.0",
@@ -844,7 +874,13 @@ async fn scripted_executor_exports_artifact_env_vars() {
     let written = fs::read_to_string(&output_path).unwrap();
     let parts: Vec<_> = written.split('|').collect();
     assert_eq!(parts.len(), 3);
-    assert!(parts[0].ends_with("artifact-scripted.bin"), "unexpected artifact path: {written}");
+    assert!(
+        parts[0].ends_with("artifact-scripted.bin"),
+        "unexpected artifact path: {written}"
+    );
     assert_eq!(parts[1], "7.0.0");
-    assert!(parts[2].contains("state-node-01"), "unexpected state dir: {written}");
+    assert!(
+        parts[2].contains("state-node-01"),
+        "unexpected state dir: {written}"
+    );
 }

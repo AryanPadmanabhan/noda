@@ -1,20 +1,16 @@
-use crate::{executors, types::*};
-use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue},
-    Client,
-};
-use sha2::{Digest, Sha256};
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command as ProcessCommand,
-    time::Duration,
-};
+mod state;
+mod validation;
+mod workflow;
+
+use crate::types::*;
+use anyhow::Result;
+use reqwest::Client;
+use std::{fs, path::PathBuf, time::Duration};
 use tokio::time::sleep;
-use tracing::{error, info, warn};
-use url::Url;
+use tracing::error;
+
+use state::{load_state, save_state, LocalState};
+use workflow::{execute_command, resume_pending_boot, CommandExecution};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -25,51 +21,6 @@ pub struct AgentConfig {
     pub poll_seconds: u64,
     pub state_dir: PathBuf,
     pub labels: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct LocalState {
-    #[serde(default)]
-    current_version: Option<String>,
-    #[serde(default)]
-    active_slot: Option<String>,
-    #[serde(default)]
-    pending_boot: Option<PendingBootState>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-enum PendingBootPhase {
-    Forward,
-    Rollback,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PendingBootState {
-    phase: PendingBootPhase,
-    command_id: String,
-    deployment_id: String,
-    release_id: String,
-    release_version: String,
-    expected_system_path: Option<String>,
-    expected_hostname: Option<String>,
-    next_active_slot: Option<String>,
-    previous_system_path: Option<String>,
-    previous_hostname: Option<String>,
-    previous_version: Option<String>,
-    previous_active_slot: Option<String>,
-    health_checks: Vec<HealthCheck>,
-    rollback: RollbackPolicy,
-    deadline: DateTime<Utc>,
-}
-
-enum CommandExecution {
-    Completed {
-        message: String,
-        state: LocalState,
-    },
-    Deferred {
-        state: LocalState,
-    },
 }
 
 pub async fn run(cfg: AgentConfig) -> Result<()> {
@@ -95,7 +46,10 @@ pub async fn run(cfg: AgentConfig) -> Result<()> {
 
         for cmd in polled.commands {
             match execute_command(&client, &cfg, &cmd).await {
-                Ok(CommandExecution::Completed { message, state: new_state }) => {
+                Ok(CommandExecution::Completed {
+                    message,
+                    state: new_state,
+                }) => {
                     save_state(&cfg.state_dir, &new_state)?;
                     report_result(
                         &client,
@@ -137,198 +91,6 @@ pub async fn run(cfg: AgentConfig) -> Result<()> {
     }
 }
 
-async fn resume_pending_boot(client: &Client, cfg: &AgentConfig, state: &mut LocalState) -> Result<()> {
-    let Some(pending) = state.pending_boot.clone() else {
-        return Ok(());
-    };
-
-    match validate_pending_boot(client, &pending).await {
-        Ok(()) => {
-            match pending.phase {
-                PendingBootPhase::Forward => {
-                    info!(
-                        asset_id = %cfg.asset_id,
-                        command_id = %pending.command_id,
-                        release = %pending.release_version,
-                        "post-boot validation succeeded"
-                    );
-                    state.current_version = Some(pending.release_version.clone());
-                    state.active_slot = pending.next_active_slot.clone();
-                    state.pending_boot = None;
-                    report_result(
-                        client,
-                        cfg,
-                        AgentResultRequest {
-                            command_id: pending.command_id,
-                            asset_id: cfg.asset_id.clone(),
-                            success: true,
-                            message: format!("validated {} after reboot", pending.release_version),
-                            active_slot: state.active_slot.clone(),
-                            booted_version: state.current_version.clone(),
-                        },
-                    )
-                    .await?;
-                }
-                PendingBootPhase::Rollback => {
-                    info!(
-                        asset_id = %cfg.asset_id,
-                        command_id = %pending.command_id,
-                        release = %pending.release_version,
-                        "rollback validation succeeded"
-                    );
-                    state.current_version = pending.previous_version.clone();
-                    state.active_slot = pending.previous_active_slot.clone();
-                    state.pending_boot = None;
-                    report_result(
-                        client,
-                        cfg,
-                        AgentResultRequest {
-                            command_id: pending.command_id,
-                            asset_id: cfg.asset_id.clone(),
-                            success: false,
-                            message: format!(
-                                "post-boot validation failed for {}; rollback succeeded",
-                                pending.release_version
-                            ),
-                            active_slot: state.active_slot.clone(),
-                            booted_version: state.current_version.clone(),
-                        },
-                    )
-                    .await?;
-                }
-            }
-        }
-        Err(err) if Utc::now() < pending.deadline => {
-            warn!(
-                asset_id = %cfg.asset_id,
-                command_id = %pending.command_id,
-                error = %err,
-                "post-boot validation still pending"
-            );
-        }
-        Err(err) => {
-            match pending.phase {
-                PendingBootPhase::Forward if should_attempt_rollback(&pending) => {
-                    let previous_system_path = pending
-                        .previous_system_path
-                        .clone()
-                        .context("missing previous system path for rollback")?;
-                    error!(
-                        asset_id = %cfg.asset_id,
-                        command_id = %pending.command_id,
-                        error = %err,
-                        rollback_to = %previous_system_path,
-                        "post-boot validation failed; starting rollback"
-                    );
-                    executors::rollback_nix_generation(&previous_system_path)?;
-                    state.pending_boot = Some(PendingBootState {
-                        phase: PendingBootPhase::Rollback,
-                        command_id: pending.command_id,
-                        deployment_id: pending.deployment_id,
-                        release_id: pending.release_id,
-                        release_version: pending.release_version,
-                        expected_system_path: Some(previous_system_path),
-                        expected_hostname: pending.previous_hostname,
-                        next_active_slot: pending.next_active_slot,
-                        previous_system_path: pending.previous_system_path,
-                        previous_hostname: None,
-                        previous_version: pending.previous_version,
-                        previous_active_slot: pending.previous_active_slot,
-                        health_checks: pending.health_checks,
-                        rollback: pending.rollback.clone(),
-                        deadline: Utc::now()
-                            + ChronoDuration::seconds(
-                                i64::try_from(pending.rollback.candidate_timeout_seconds).unwrap_or(900),
-                            ),
-                    });
-                }
-                PendingBootPhase::Forward => {
-                    error!(
-                        asset_id = %cfg.asset_id,
-                        command_id = %pending.command_id,
-                        error = %err,
-                        "post-boot validation timed out"
-                    );
-                    state.pending_boot = None;
-                    report_result(
-                        client,
-                        cfg,
-                        AgentResultRequest {
-                            command_id: pending.command_id,
-                            asset_id: cfg.asset_id.clone(),
-                            success: false,
-                            message: format!("post-boot validation failed: {err}"),
-                            active_slot: state.active_slot.clone(),
-                            booted_version: state.current_version.clone(),
-                        },
-                    )
-                    .await?;
-                }
-                PendingBootPhase::Rollback => {
-                    error!(
-                        asset_id = %cfg.asset_id,
-                        command_id = %pending.command_id,
-                        error = %err,
-                        "rollback validation failed"
-                    );
-                    state.pending_boot = None;
-                    report_result(
-                        client,
-                        cfg,
-                        AgentResultRequest {
-                            command_id: pending.command_id,
-                            asset_id: cfg.asset_id.clone(),
-                            success: false,
-                            message: format!(
-                                "post-boot validation failed and rollback failed: {err}"
-                            ),
-                            active_slot: state.active_slot.clone(),
-                            booted_version: state.current_version.clone(),
-                        },
-                    )
-                    .await?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn should_attempt_rollback(pending: &PendingBootState) -> bool {
-    pending.rollback.automatic
-        && pending.rollback.on_validation_failure
-        && pending.previous_system_path.is_some()
-}
-
-async fn validate_pending_boot(client: &Client, pending: &PendingBootState) -> Result<()> {
-    if let Some(expected_system_path) = &pending.expected_system_path {
-        let actual = current_system_path()?;
-        let expected = normalize_path(expected_system_path)?;
-        if actual != expected {
-            return Err(anyhow!(
-                "current system mismatch: expected {}, got {}",
-                expected,
-                actual
-            ));
-        }
-    }
-
-    if let Some(expected_hostname) = &pending.expected_hostname {
-        let actual = current_hostname()?;
-        if actual != *expected_hostname {
-            return Err(anyhow!(
-                "hostname mismatch: expected {}, got {}",
-                expected_hostname,
-                actual
-            ));
-        }
-    }
-
-    run_health_checks(client, &pending.health_checks).await?;
-    Ok(())
-}
-
 async fn checkin(client: &Client, cfg: &AgentConfig, state: &LocalState) -> Result<()> {
     let req = AgentCheckinRequest {
         asset_id: cfg.asset_id.clone(),
@@ -337,7 +99,7 @@ async fn checkin(client: &Client, cfg: &AgentConfig, state: &LocalState) -> Resu
         labels: cfg.labels.clone(),
         current_version: state.current_version.clone(),
         active_slot: state.active_slot.clone(),
-        status: Some("online".into()),
+        status: Some(AssetStatus::Online),
     };
     client
         .post(format!("{}/v1/agent/checkin", cfg.server))
@@ -360,280 +122,16 @@ async fn poll(client: &Client, cfg: &AgentConfig) -> Result<AgentPollResponse> {
     Ok(resp.json().await?)
 }
 
-async fn report_result(client: &Client, cfg: &AgentConfig, result: AgentResultRequest) -> Result<()> {
+async fn report_result(
+    client: &Client,
+    cfg: &AgentConfig,
+    result: AgentResultRequest,
+) -> Result<()> {
     client
         .post(format!("{}/v1/agent/result", cfg.server))
         .json(&result)
         .send()
         .await?
         .error_for_status()?;
-    Ok(())
-}
-
-async fn execute_command(client: &Client, cfg: &AgentConfig, cmd: &CommandRecord) -> Result<CommandExecution> {
-    info!(
-        asset_id = %cfg.asset_id,
-        command_id = %cmd.id,
-        release = %cmd.release_version,
-        "executing command"
-    );
-    let artifact_path = if let Some(artifact) = artifact_source(&cmd.manifest.executor) {
-        let path = download_artifact(client, &cfg.state_dir, artifact).await?;
-        verify_sha256(&path, artifact.sha256.as_deref())?;
-        Some(path)
-    } else {
-        None
-    };
-
-    let mut state = load_state(&cfg.state_dir)?;
-    let executor = executors::build(&cmd.manifest.executor);
-    let current_slot = state.active_slot.clone().unwrap_or_else(|| {
-        slot_pair(&cmd.manifest.executor)
-            .map(|s| s[0].clone())
-            .unwrap_or_else(|| "A".into())
-    });
-    let next_slot = compute_next_slot(&current_slot, slot_pair(&cmd.manifest.executor));
-    let previous_system_path = if matches!(cmd.manifest.executor, ExecutorSpec::NixGeneration(_)) {
-        Some(current_system_path()?)
-    } else {
-        None
-    };
-    let previous_hostname = if matches!(cmd.manifest.executor, ExecutorSpec::NixGeneration(_)) {
-        Some(current_hostname()?)
-    } else {
-        None
-    };
-    let previous_version = state.current_version.clone();
-    let previous_active_slot = state.active_slot.clone();
-
-    let ctx = executors::ExecutionContext {
-        command_id: cmd.id.clone(),
-        artifact_path,
-        current_slot: current_slot.clone(),
-        next_slot: next_slot.clone(),
-        manifest: cmd.manifest.clone(),
-        release_version: cmd.release_version.clone(),
-        state_dir: cfg.state_dir.clone(),
-    };
-
-    executor.install(&ctx).await?;
-    let activation = executor.activate(&ctx).await?;
-    match activation {
-        executors::ActivationOutcome::Complete => {
-            run_health_checks(client, &cmd.manifest.validation.health_checks).await?;
-            state.current_version = Some(cmd.release_version.clone());
-            state.active_slot = Some(next_slot);
-            Ok(CommandExecution::Completed {
-                message: format!("installed {}", cmd.release_version),
-                state,
-            })
-        }
-        executors::ActivationOutcome::AwaitReboot(pending) => {
-            state.pending_boot = Some(PendingBootState {
-                phase: PendingBootPhase::Forward,
-                command_id: cmd.id.clone(),
-                deployment_id: cmd.deployment_id.clone(),
-                release_id: cmd.release_id.clone(),
-                release_version: cmd.release_version.clone(),
-                expected_system_path: pending
-                    .expected_system_path
-                    .or_else(|| cmd.manifest.validation.expected_system_path.clone()),
-                expected_hostname: cmd.manifest.validation.expected_hostname.clone(),
-                next_active_slot: Some(next_slot),
-                previous_system_path,
-                previous_hostname,
-                previous_version,
-                previous_active_slot,
-                health_checks: cmd.manifest.validation.health_checks.clone(),
-                rollback: cmd.manifest.rollback.clone(),
-                deadline: Utc::now()
-                    + ChronoDuration::seconds(
-                        i64::try_from(cmd.manifest.validation.timeout_seconds).unwrap_or(900),
-                    ),
-            });
-            Ok(CommandExecution::Deferred { state })
-        }
-    }
-}
-
-fn artifact_source(executor: &ExecutorSpec) -> Option<&ArtifactSource> {
-    match executor {
-        ExecutorSpec::Scripted(spec) => Some(&spec.artifact),
-        ExecutorSpec::GrubAb(spec) => Some(&spec.artifact),
-        ExecutorSpec::Noop | ExecutorSpec::NixGeneration(_) => None,
-    }
-}
-
-fn slot_pair(executor: &ExecutorSpec) -> Option<&[String; 2]> {
-    match executor {
-        ExecutorSpec::GrubAb(spec) => spec.slot_pair.as_ref(),
-        ExecutorSpec::Noop | ExecutorSpec::Scripted(_) | ExecutorSpec::NixGeneration(_) => None,
-    }
-}
-
-fn compute_next_slot(current: &str, pair: Option<&[String; 2]>) -> String {
-    if let Some([a, b]) = pair {
-        if current == a {
-            b.clone()
-        } else {
-            a.clone()
-        }
-    } else if current == "A" {
-        "B".into()
-    } else {
-        "A".into()
-    }
-}
-
-async fn download_artifact(client: &Client, state_dir: &Path, artifact: &ArtifactSource) -> Result<PathBuf> {
-    let artifact_dir = state_dir.join("artifacts");
-    fs::create_dir_all(&artifact_dir)?;
-    let url = Url::parse(&artifact.url)?;
-    let filename = url
-        .path_segments()
-        .and_then(|segments| segments.last())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("artifact.bin");
-    let dest = artifact_dir.join(filename);
-
-    match url.scheme() {
-        "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| anyhow!("invalid file:// URL"))?;
-            if path.is_dir() {
-                if dest.exists() {
-                    fs::remove_dir_all(&dest)?;
-                }
-                copy_dir_all(&path, &dest)?;
-            } else {
-                fs::copy(path, &dest)?;
-            }
-        }
-        "http" | "https" => {
-            let mut headers = HeaderMap::new();
-            for (k, v) in &artifact.headers {
-                headers.insert(
-                    HeaderName::from_bytes(k.as_bytes())?,
-                    HeaderValue::from_str(v)?,
-                );
-            }
-            let bytes = client
-                .get(url.clone())
-                .headers(headers)
-                .send()
-                .await?
-                .error_for_status()?
-                .bytes()
-                .await?;
-            fs::write(&dest, &bytes)?;
-        }
-        other => return Err(anyhow!("unsupported artifact scheme: {other}")),
-    }
-    Ok(dest)
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dest = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dest)?;
-        } else {
-            fs::copy(entry.path(), dest)?;
-        }
-    }
-    Ok(())
-}
-
-fn verify_sha256(path: &Path, expected: Option<&str>) -> Result<()> {
-    if path.is_dir() {
-        return Ok(());
-    }
-    if let Some(expected) = expected {
-        let data = fs::read(path)?;
-        let digest = Sha256::digest(&data);
-        let actual = format!("{:x}", digest);
-        if actual != expected.to_ascii_lowercase() {
-            return Err(anyhow!("sha256 mismatch: expected {expected}, got {actual}"));
-        }
-    }
-    Ok(())
-}
-
-async fn run_health_checks(client: &Client, checks: &[HealthCheck]) -> Result<()> {
-    for check in checks {
-        match check.kind {
-            HealthCheckKind::AlwaysPass => {}
-            HealthCheckKind::CommandExitZero => {
-                let command = check
-                    .command
-                    .as_ref()
-                    .context("missing command for command_exit_zero health check")?;
-                let status = ProcessCommand::new("sh").arg("-lc").arg(command).status()?;
-                if !status.success() {
-                    return Err(anyhow!(
-                        "health check {} failed with exit status {}",
-                        check.name,
-                        status
-                    ));
-                }
-            }
-            HealthCheckKind::HttpGet => {
-                let url = check
-                    .url
-                    .as_ref()
-                    .context("missing url for http_get health check")?;
-                let body = client.get(url).send().await?.error_for_status()?.text().await?;
-                if let Some(contains) = &check.contains {
-                    if !body.contains(contains) {
-                        return Err(anyhow!(
-                            "health check {} body missing expected text",
-                            check.name
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn current_system_path() -> Result<String> {
-    let link = env::var("DEPLOY_INTENT_CURRENT_SYSTEM_LINK").unwrap_or_else(|_| "/run/current-system".into());
-    normalize_path(link)
-}
-
-fn current_hostname() -> Result<String> {
-    if let Ok(path) = env::var("DEPLOY_INTENT_HOSTNAME_FILE") {
-        return Ok(fs::read_to_string(path)?.trim().to_string());
-    }
-    let raw = fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| fs::read_to_string("/etc/hostname"))?;
-    Ok(raw.trim().to_string())
-}
-
-fn normalize_path(path: impl AsRef<Path>) -> Result<String> {
-    Ok(fs::canonicalize(path)?.display().to_string())
-}
-
-fn state_path(dir: &Path) -> PathBuf {
-    dir.join("state.json")
-}
-
-fn load_state(dir: &Path) -> Result<LocalState> {
-    let path = state_path(dir);
-    if !path.exists() {
-        return Ok(LocalState::default());
-    }
-    let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-fn save_state(dir: &Path, state: &LocalState) -> Result<()> {
-    let raw = serde_json::to_string_pretty(state)?;
-    fs::write(state_path(dir), raw)?;
     Ok(())
 }
