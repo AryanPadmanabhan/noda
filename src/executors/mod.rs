@@ -17,6 +17,7 @@ use std::{
 };
 
 pub use nix_generation::rollback_nix_generation;
+pub use grub_ab::rollback_grub_ab;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -38,6 +39,17 @@ pub enum ActivationOutcome {
 #[derive(Debug, Clone)]
 pub struct PendingReboot {
     pub expected_system_path: Option<String>,
+    pub expected_active_slot: Option<String>,
+    pub expected_root_device: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum RollbackAction {
+    NixGeneration { previous_system_path: String },
+    GrubAb {
+        grubenv_path: String,
+        previous_grub_menu_entry: String,
+    },
 }
 
 pub trait Executor: Send + Sync {
@@ -57,6 +69,36 @@ pub fn build(spec: &ExecutorSpec) -> Box<dyn Executor> {
         ExecutorSpec::GrubAb(_) => Box::new(grub_ab::GrubAbExecutor),
         ExecutorSpec::NixGeneration(_) => Box::new(nix_generation::NixGenerationExecutor),
         ExecutorSpec::Noop => Box::new(noop::NoopExecutor),
+    }
+}
+
+pub fn detect_current_slot(spec: &ExecutorSpec) -> Result<Option<String>> {
+    match spec {
+        ExecutorSpec::GrubAb(grub) if grub.slots.is_some() => {
+            Ok(Some(grub_ab::detect_active_slot(grub)?))
+        }
+        ExecutorSpec::GrubAb(_) | ExecutorSpec::Noop | ExecutorSpec::Scripted(_) | ExecutorSpec::NixGeneration(_) => {
+            Ok(None)
+        }
+    }
+}
+
+pub fn rollback_action(
+    spec: &ExecutorSpec,
+    current_slot: &str,
+    previous_system_path: Option<String>,
+) -> Result<Option<RollbackAction>> {
+    match spec {
+        ExecutorSpec::NixGeneration(_) => Ok(previous_system_path.map(|path| {
+            RollbackAction::NixGeneration {
+                previous_system_path: path,
+            }
+        })),
+        ExecutorSpec::GrubAb(grub) if grub.slots.is_some() => {
+            grub_ab::rollback_action(grub, current_slot).map(Some)
+        }
+        ExecutorSpec::GrubAb(_) => Ok(None),
+        ExecutorSpec::Noop | ExecutorSpec::Scripted(_) => Ok(None),
     }
 }
 

@@ -141,6 +141,8 @@ impl Executor for NixGenerationExecutor {
 
             Ok(ActivationOutcome::AwaitReboot(PendingReboot {
                 expected_system_path: Some(metadata.system_path),
+                expected_active_slot: None,
+                expected_root_device: None,
             }))
         })
     }

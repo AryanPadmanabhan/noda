@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     net::TcpListener,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -50,6 +51,7 @@ struct AssetRecord {
     asset_id: String,
     current_version: Option<String>,
     mission_state: String,
+    active_slot: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +260,72 @@ fn make_artifact(root: &Path, name: &str, contents: &[u8]) -> (PathBuf, String) 
     (path, format!("{:x}", digest))
 }
 
+fn make_executable(root: &Path, name: &str, body: &str) -> PathBuf {
+    let path = root.join(name);
+    fs::write(&path, body).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[derive(Debug)]
+struct GrubAbHarness {
+    slot_a: PathBuf,
+    slot_b: PathBuf,
+    grubenv: PathBuf,
+    active_device_file: PathBuf,
+    reboot_script: PathBuf,
+    grub_editenv_script: PathBuf,
+}
+
+fn make_grub_ab_harness(root: &Path) -> GrubAbHarness {
+    let slot_a = root.join("slot-a.img");
+    let slot_b = root.join("slot-b.img");
+    let grubenv = root.join("grubenv");
+    let active_device_file = root.join("active-device");
+
+    fs::write(&slot_a, b"slot-a-initial").unwrap();
+    fs::write(&slot_b, b"slot-b-initial").unwrap();
+    fs::write(&grubenv, "saved_entry=noda-slot-a\n").unwrap();
+    fs::write(&active_device_file, format!("{}\n", slot_a.display())).unwrap();
+
+    let grub_editenv_script = make_executable(
+        root,
+        "fake-grub-editenv.sh",
+        r#"#!/bin/sh
+grubenv="$1"
+cmd="$2"
+assignment="$3"
+[ "$cmd" = "set" ] || exit 1
+printf '%s\n' "$assignment" > "$grubenv"
+"#,
+    );
+    let reboot_script = make_executable(
+        root,
+        "fake-reboot.sh",
+        &format!(
+            r#"#!/bin/sh
+grep -q 'saved_entry=noda-slot-b' "{grubenv}" && printf '%s\n' "{slot_b}" > "{active_device}" || printf '%s\n' "{slot_a}" > "{active_device}"
+exit 0
+"#,
+            grubenv = grubenv.display(),
+            slot_a = slot_a.display(),
+            slot_b = slot_b.display(),
+            active_device = active_device_file.display(),
+        ),
+    );
+
+    GrubAbHarness {
+        slot_a,
+        slot_b,
+        grubenv,
+        active_device_file,
+        reboot_script,
+        grub_editenv_script,
+    }
+}
+
 async fn create_release(
     env: &TestEnv,
     version: &str,
@@ -329,6 +397,55 @@ async fn create_release_from_manifest(
         .json::<ReleaseRecord>()
         .await
         .unwrap()
+}
+
+async fn create_grub_ab_release(
+    env: &TestEnv,
+    version: &str,
+    artifact_url: String,
+    sha256: Option<String>,
+    harness: &GrubAbHarness,
+    validation: Value,
+) -> ReleaseRecord {
+    create_release_from_manifest(
+        env,
+        version,
+        json!({
+            "target_type": "edge-linux-x86",
+            "executor": {
+                "kind": "grub_ab",
+                "artifact": {
+                    "url": artifact_url,
+                    "sha256": sha256,
+                    "headers": {}
+                },
+                "slot_pair": ["A", "B"],
+                "slots": [
+                    {
+                        "name": "A",
+                        "device": harness.slot_a,
+                        "grub_menu_entry": "noda-slot-a"
+                    },
+                    {
+                        "name": "B",
+                        "device": harness.slot_b,
+                        "grub_menu_entry": "noda-slot-b"
+                    }
+                ],
+                "grubenv_path": harness.grubenv,
+                "compression": "none"
+            },
+            "validation": validation,
+            "rollback": {
+                "automatic": true,
+                "on_boot_failure": true,
+                "on_validation_failure": true,
+                "candidate_timeout_seconds": 2
+            },
+            "labels": {"track": "test"}
+        }),
+    )
+    .await
 }
 
 async fn create_deployment(
@@ -883,4 +1000,169 @@ async fn scripted_executor_exports_artifact_env_vars() {
         parts[2].contains("state-node-01"),
         "unexpected state dir: {written}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grub_ab_real_mode_writes_inactive_slot_and_reports_success() {
+    let root = unique_root("grub-ab-real-success");
+    let (server, server_url) = start_server(&root).await;
+    let harness = make_grub_ab_harness(&root);
+    let client = Client::new();
+    let agent = spawn_agent_with_env(
+        &server_url,
+        &root,
+        "node-01",
+        "edge-linux-x86",
+        "idle",
+        &["region=lab"],
+        &[
+            (
+                "NODA_GRUB_AB_ACTIVE_DEVICE_FILE",
+                harness.active_device_file.to_str().unwrap(),
+            ),
+            ("NODA_GRUB_EDITENV", harness.grub_editenv_script.to_str().unwrap()),
+            ("NODA_REBOOT_COMMAND", harness.reboot_script.to_str().unwrap()),
+        ],
+    );
+    let env = TestEnv {
+        root: root.clone(),
+        server_url,
+        _server: server,
+        _agents: vec![agent],
+        client,
+    };
+
+    wait_until(Duration::from_secs(20), || {
+        let env = &env;
+        async move { Some(assets(env).await.len() == 1) }
+    })
+    .await;
+
+    let (artifact_path, sha256) =
+        make_artifact(&env.root, "grub-ab-image.ext4", b"bootable-rootfs-image-v1");
+    let release = create_grub_ab_release(
+        &env,
+        "8.0.0",
+        Url::from_file_path(artifact_path).unwrap().to_string(),
+        Some(sha256),
+        &harness,
+        json!({
+            "timeout_seconds": 5,
+            "health_checks": [always_pass_check()]
+        }),
+    )
+    .await;
+
+    let deployment = create_deployment(
+        &env,
+        &release.id,
+        "edge-linux-x86",
+        json!({"region": "lab"}),
+        vec!["idle"],
+        0,
+        1,
+        1.0,
+        true,
+    )
+    .await;
+
+    wait_until(Duration::from_secs(15), || {
+        let env = &env;
+        let deployment_id = deployment.id.clone();
+        async move {
+            let ts = targets(env, &deployment_id).await;
+            Some(ts.len() == 1 && ts[0].state == "succeeded")
+        }
+    })
+    .await;
+
+    let slot_b = fs::read(&harness.slot_b).unwrap();
+    assert_eq!(slot_b, b"bootable-rootfs-image-v1");
+
+    let asets = assets(&env).await;
+    assert_eq!(asets[0].current_version.as_deref(), Some("8.0.0"));
+    assert_eq!(asets[0].active_slot.as_deref(), Some("B"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grub_ab_real_mode_rolls_back_after_validation_failure() {
+    let root = unique_root("grub-ab-real-rollback");
+    let (server, server_url) = start_server(&root).await;
+    let harness = make_grub_ab_harness(&root);
+    let client = Client::new();
+    let agent = spawn_agent_with_env(
+        &server_url,
+        &root,
+        "node-01",
+        "edge-linux-x86",
+        "idle",
+        &["region=lab"],
+        &[
+            (
+                "NODA_GRUB_AB_ACTIVE_DEVICE_FILE",
+                harness.active_device_file.to_str().unwrap(),
+            ),
+            ("NODA_GRUB_EDITENV", harness.grub_editenv_script.to_str().unwrap()),
+            ("NODA_REBOOT_COMMAND", harness.reboot_script.to_str().unwrap()),
+        ],
+    );
+    let env = TestEnv {
+        root: root.clone(),
+        server_url,
+        _server: server,
+        _agents: vec![agent],
+        client,
+    };
+
+    wait_until(Duration::from_secs(20), || {
+        let env = &env;
+        async move { Some(assets(env).await.len() == 1) }
+    })
+    .await;
+
+    let (artifact_path, sha256) =
+        make_artifact(&env.root, "grub-ab-image.ext4", b"bootable-rootfs-image-v2");
+    let release = create_grub_ab_release(
+        &env,
+        "9.0.0",
+        Url::from_file_path(artifact_path).unwrap().to_string(),
+        Some(sha256),
+        &harness,
+        json!({
+            "expected_hostname": "definitely-not-this-host",
+            "timeout_seconds": 1,
+            "health_checks": [always_pass_check()]
+        }),
+    )
+    .await;
+
+    let deployment = create_deployment(
+        &env,
+        &release.id,
+        "edge-linux-x86",
+        json!({"region": "lab"}),
+        vec!["idle"],
+        0,
+        1,
+        1.0,
+        true,
+    )
+    .await;
+
+    wait_until(Duration::from_secs(20), || {
+        let env = &env;
+        let deployment_id = deployment.id.clone();
+        async move {
+            let ts = targets(env, &deployment_id).await;
+            Some(ts.len() == 1 && ts[0].state == "failed")
+        }
+    })
+    .await;
+
+    let active_device = fs::read_to_string(&harness.active_device_file).unwrap();
+    assert_eq!(active_device.trim(), harness.slot_a.display().to_string());
+
+    let asets = assets(&env).await;
+    assert_eq!(asets[0].current_version, None);
+    assert_eq!(asets[0].active_slot.as_deref(), Some("A"));
 }

@@ -321,7 +321,19 @@ Example: copy prebuilt system from a store source
 
 ### `grub_ab`
 
-`grub_ab` currently stages the artifact into the inactive slot area and can optionally run a user-supplied activation command. It is a scaffolding executor, not a full bootloader-integrated A/B implementation yet. I am still building this. ß
+`grub_ab` is the non-Nix A/B executor. The v1 contract is intentionally narrow:
+
+- the user provides a bootable rootfs image
+- supported artifact formats are raw `ext4` and `ext4.zst`
+- the machine already has two root partitions and a working GRUB config
+- the release declares both slot devices and the GRUB menu entry for each slot
+- the agent writes the image into the inactive root partition
+- the agent sets `saved_entry` in `grubenv`
+- the machine reboots
+- post-boot validation runs
+- rollback sets `saved_entry` back to the previous slot and reboots again
+
+The executor detects the currently booted slot by comparing the active root device from `findmnt -n -o SOURCE /` against the configured slot devices.
 
 Example:
 
@@ -333,11 +345,25 @@ Example:
     "executor": {
       "kind": "grub_ab",
       "artifact": {
-        "url": "https://customer-store.example.com/releases/edge-2.4.1.img.zst",
+        "url": "https://customer-store.example.com/releases/edge-2.4.1.ext4.zst",
         "sha256": "deadbeef...",
         "headers": {}
       },
-      "slot_pair": ["A", "B"]
+      "slot_pair": ["A", "B"],
+      "slots": [
+        {
+          "name": "A",
+          "device": "/dev/disk/by-partlabel/rootfs-a",
+          "grub_menu_entry": "noda-slot-a"
+        },
+        {
+          "name": "B",
+          "device": "/dev/disk/by-partlabel/rootfs-b",
+          "grub_menu_entry": "noda-slot-b"
+        }
+      ],
+      "grubenv_path": "/boot/grub/grubenv",
+      "compression": "auto"
     },
     "validation": {
       "health_checks": [
@@ -351,6 +377,39 @@ Example:
   }
 }
 ```
+
+### `grub_ab` VM test path
+
+The intended manual VM layout is:
+
+- EFI partition
+- `rootfs-a`
+- `rootfs-b`
+- persistent data partition
+
+For a first pass:
+
+1. Install GRUB with menu entries for both root partitions.
+2. Make sure `grub-editenv` works on the guest.
+3. Install `noda` on the VM and keep its state on the persistent partition.
+4. Build a bootable `ext4` or `ext4.zst` image that already contains the agent and your service payload.
+5. Create a `grub_ab` release pointing at the two root partitions and GRUB menu entries.
+6. Deploy it and verify:
+   - the inactive root partition was overwritten
+   - `saved_entry` was changed in `grubenv`
+   - the machine rebooted into the new slot
+   - post-boot validation passed
+7. Repeat with an intentionally wrong `expected_hostname` to force rollback.
+
+The Rust test suite now includes process-level `grub_ab` tests that simulate:
+
+- active slot detection
+- image write into the inactive slot
+- `grub-editenv set saved_entry=...`
+- reboot into the candidate slot
+- rollback after validation failure
+
+These tests do not replace a real Linux VM test, but they cover the first-pass backend logic in CI.
 
 ### `scripted`
 

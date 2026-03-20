@@ -39,7 +39,29 @@ pub struct GrubAbExecutorSpec {
     #[serde(default)]
     pub slot_pair: Option<[String; 2]>,
     #[serde(default)]
+    pub slots: Option<[GrubAbSlot; 2]>,
+    #[serde(default = "default_grubenv_path")]
+    pub grubenv_path: String,
+    #[serde(default)]
+    pub compression: GrubAbCompression,
+    #[serde(default)]
     pub activate_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrubAbSlot {
+    pub name: String,
+    pub device: String,
+    pub grub_menu_entry: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrubAbCompression {
+    None,
+    Zstd,
+    #[default]
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +140,10 @@ impl ValidationSpec {
 
 fn default_validation_timeout_secs() -> u64 {
     900
+}
+
+fn default_grubenv_path() -> String {
+    "/boot/grub/grubenv".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +244,37 @@ impl ReleaseManifest {
                     if left == right {
                         return Err(anyhow!("grub_ab.slot_pair entries must be distinct"));
                     }
+                }
+                if let Some(slots) = &spec.slots {
+                    for slot in slots {
+                        if slot.name.trim().is_empty() {
+                            return Err(anyhow!("grub_ab.slots names must not be empty"));
+                        }
+                        if slot.device.trim().is_empty() {
+                            return Err(anyhow!("grub_ab.slots devices must not be empty"));
+                        }
+                        if slot.grub_menu_entry.trim().is_empty() {
+                            return Err(anyhow!(
+                                "grub_ab.slots grub_menu_entry values must not be empty"
+                            ));
+                        }
+                    }
+                    if slots[0].name == slots[1].name {
+                        return Err(anyhow!("grub_ab.slots names must be distinct"));
+                    }
+                    if slots[0].device == slots[1].device {
+                        return Err(anyhow!("grub_ab.slots devices must be distinct"));
+                    }
+                    if let Some([left, right]) = &spec.slot_pair {
+                        if slots[0].name != *left || slots[1].name != *right {
+                            return Err(anyhow!(
+                                "grub_ab.slot_pair must match grub_ab.slots order when both are provided"
+                            ));
+                        }
+                    }
+                }
+                if spec.grubenv_path.trim().is_empty() {
+                    return Err(anyhow!("grub_ab.grubenv_path must not be empty"));
                 }
                 if let Some(command) = &spec.activate_command {
                     if command.trim().is_empty() {
@@ -579,6 +636,37 @@ mod tests {
         let encoded = serde_json::to_string(&DeploymentTargetState::RolledBack)
             .expect("serialize deployment target state");
         assert_eq!(encoded, "\"rolled_back\"");
+    }
+
+    #[test]
+    fn create_release_validation_rejects_mismatched_grub_slot_pair() {
+        let manifest: ReleaseManifest = serde_json::from_value(json!({
+            "target_type": "edge-linux-x86",
+            "executor": {
+                "kind": "grub_ab",
+                "artifact": {
+                    "url": "file:///tmp/artifact.ext4",
+                    "sha256": null,
+                    "headers": {}
+                },
+                "slot_pair": ["A", "B"],
+                "slots": [
+                    {
+                        "name": "B",
+                        "device": "/dev/disk/by-partlabel/root-b",
+                        "grub_menu_entry": "noda-slot-b"
+                    },
+                    {
+                        "name": "A",
+                        "device": "/dev/disk/by-partlabel/root-a",
+                        "grub_menu_entry": "noda-slot-a"
+                    }
+                ]
+            }
+        }))
+        .expect("valid json");
+
+        manifest.validate().expect_err("validation should fail");
     }
 }
 

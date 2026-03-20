@@ -2,7 +2,7 @@ use super::{
     report_result,
     state::{load_state, LocalState, PendingBootPhase, PendingBootState},
     validation::{
-        copy_dir_all, current_hostname, current_system_path, run_health_checks,
+        copy_dir_all, current_hostname, current_root_device, current_system_path, run_health_checks,
         validate_pending_boot, verify_sha256,
     },
     AgentConfig,
@@ -99,31 +99,34 @@ pub(super) async fn resume_pending_boot(
         }
         Err(err) => match pending.phase {
             PendingBootPhase::Forward if should_attempt_rollback(&pending) => {
-                let previous_system_path = pending
-                    .previous_system_path
-                    .clone()
-                    .context("missing previous system path for rollback")?;
                 error!(
                     asset_id = %cfg.asset_id,
                     command_id = %pending.command_id,
                     error = %err,
-                    rollback_to = %previous_system_path,
                     "post-boot validation failed; starting rollback"
                 );
-                executors::rollback_nix_generation(&previous_system_path)?;
+                let rollback_action = pending
+                    .rollback_action
+                    .clone()
+                    .context("missing rollback action for rollback")?;
+                perform_rollback(&rollback_action)?;
                 state.pending_boot = Some(PendingBootState {
                     phase: PendingBootPhase::Rollback,
                     command_id: pending.command_id,
                     deployment_id: pending.deployment_id,
                     release_id: pending.release_id,
                     release_version: pending.release_version,
-                    expected_system_path: Some(previous_system_path),
+                    expected_system_path: pending.previous_system_path.clone(),
                     expected_hostname: pending.previous_hostname,
-                    next_active_slot: pending.next_active_slot,
+                    expected_active_slot: pending.previous_active_slot.clone(),
+                    expected_root_device: pending.previous_root_device.clone(),
+                    next_active_slot: pending.previous_active_slot.clone(),
                     previous_system_path: pending.previous_system_path,
+                    previous_root_device: pending.previous_root_device,
                     previous_hostname: None,
                     previous_version: pending.previous_version,
                     previous_active_slot: pending.previous_active_slot,
+                    rollback_action: None,
                     health_checks: pending.health_checks,
                     rollback: pending.rollback.clone(),
                     deadline: Utc::now()
@@ -204,24 +207,37 @@ pub(super) async fn execute_command(
 
     let mut state = load_state(&cfg.state_dir)?;
     let executor = executors::build(&cmd.manifest.executor);
-    let current_slot = state.active_slot.clone().unwrap_or_else(|| {
-        slot_pair(&cmd.manifest.executor)
-            .map(|slots| slots[0].clone())
-            .unwrap_or_else(|| "A".into())
-    });
-    let next_slot = compute_next_slot(&current_slot, slot_pair(&cmd.manifest.executor));
+    let slot_pair = slot_pair(&cmd.manifest.executor);
+    let current_slot = executors::detect_current_slot(&cmd.manifest.executor)?
+        .or_else(|| state.active_slot.clone())
+        .unwrap_or_else(|| {
+            slot_pair
+                .as_ref()
+                .map(|slots| slots[0].clone())
+                .unwrap_or_else(|| "A".into())
+        });
+    let next_slot = compute_next_slot(&current_slot, slot_pair.as_ref());
     let previous_system_path = if matches!(cmd.manifest.executor, ExecutorSpec::NixGeneration(_)) {
         Some(current_system_path()?)
     } else {
         None
     };
-    let previous_hostname = if matches!(cmd.manifest.executor, ExecutorSpec::NixGeneration(_)) {
+    let previous_hostname = if requires_reboot(&cmd.manifest.executor) {
         Some(current_hostname()?)
     } else {
         None
     };
+    let previous_active_slot = Some(current_slot.clone()).or_else(|| state.active_slot.clone());
+    let previous_root_device = match &cmd.manifest.executor {
+        ExecutorSpec::GrubAb(spec) if spec.slots.is_some() => Some(current_root_device()?),
+        ExecutorSpec::GrubAb(_) | ExecutorSpec::Noop | ExecutorSpec::Scripted(_) | ExecutorSpec::NixGeneration(_) => None,
+    };
     let previous_version = state.current_version.clone();
-    let previous_active_slot = state.active_slot.clone();
+    let rollback_action = executors::rollback_action(
+        &cmd.manifest.executor,
+        &current_slot,
+        previous_system_path.clone(),
+    )?;
 
     let ctx = executors::ExecutionContext {
         command_id: cmd.id.clone(),
@@ -256,11 +272,18 @@ pub(super) async fn execute_command(
                     .expected_system_path
                     .or_else(|| cmd.manifest.validation.expected_system_path.clone()),
                 expected_hostname: cmd.manifest.validation.expected_hostname.clone(),
+                expected_active_slot: pending.expected_active_slot.or_else(|| {
+                    matches!(cmd.manifest.executor, ExecutorSpec::GrubAb(_))
+                        .then(|| next_slot.clone())
+                }),
+                expected_root_device: pending.expected_root_device,
                 next_active_slot: Some(next_slot),
                 previous_system_path,
+                previous_root_device,
                 previous_hostname,
                 previous_version,
                 previous_active_slot,
+                rollback_action,
                 health_checks: cmd.manifest.validation.health_checks.clone(),
                 rollback: cmd.manifest.rollback.clone(),
                 deadline: Utc::now()
@@ -274,9 +297,7 @@ pub(super) async fn execute_command(
 }
 
 fn should_attempt_rollback(pending: &PendingBootState) -> bool {
-    pending.rollback.automatic
-        && pending.rollback.on_validation_failure
-        && pending.previous_system_path.is_some()
+    pending.rollback.automatic && pending.rollback.on_validation_failure && pending.rollback_action.is_some()
 }
 
 fn artifact_source(executor: &ExecutorSpec) -> Option<&ArtifactSource> {
@@ -287,9 +308,12 @@ fn artifact_source(executor: &ExecutorSpec) -> Option<&ArtifactSource> {
     }
 }
 
-fn slot_pair(executor: &ExecutorSpec) -> Option<&[String; 2]> {
+fn slot_pair(executor: &ExecutorSpec) -> Option<[String; 2]> {
     match executor {
-        ExecutorSpec::GrubAb(spec) => spec.slot_pair.as_ref(),
+        ExecutorSpec::GrubAb(spec) => spec
+            .slot_pair
+            .clone()
+            .or_else(|| spec.slots.as_ref().map(|slots| [slots[0].name.clone(), slots[1].name.clone()])),
         ExecutorSpec::Noop | ExecutorSpec::Scripted(_) | ExecutorSpec::NixGeneration(_) => None,
     }
 }
@@ -305,6 +329,26 @@ fn compute_next_slot(current: &str, pair: Option<&[String; 2]>) -> String {
         "B".into()
     } else {
         "A".into()
+    }
+}
+
+fn requires_reboot(executor: &ExecutorSpec) -> bool {
+    match executor {
+        ExecutorSpec::NixGeneration(_) => true,
+        ExecutorSpec::GrubAb(spec) => spec.slots.is_some(),
+        ExecutorSpec::Noop | ExecutorSpec::Scripted(_) => false,
+    }
+}
+
+fn perform_rollback(action: &executors::RollbackAction) -> Result<()> {
+    match action {
+        executors::RollbackAction::NixGeneration {
+            previous_system_path,
+        } => executors::rollback_nix_generation(previous_system_path),
+        executors::RollbackAction::GrubAb {
+            grubenv_path,
+            previous_grub_menu_entry,
+        } => executors::rollback_grub_ab(grubenv_path, previous_grub_menu_entry),
     }
 }
 

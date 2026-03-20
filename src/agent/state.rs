@@ -1,4 +1,4 @@
-use crate::types::{HealthCheck, RollbackPolicy};
+use crate::{executors::RollbackAction, types::{HealthCheck, RollbackPolicy}};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::{
@@ -31,11 +31,15 @@ pub(super) struct PendingBootState {
     pub(super) release_version: String,
     pub(super) expected_system_path: Option<String>,
     pub(super) expected_hostname: Option<String>,
+    pub(super) expected_active_slot: Option<String>,
+    pub(super) expected_root_device: Option<String>,
     pub(super) next_active_slot: Option<String>,
     pub(super) previous_system_path: Option<String>,
+    pub(super) previous_root_device: Option<String>,
     pub(super) previous_hostname: Option<String>,
     pub(super) previous_version: Option<String>,
     pub(super) previous_active_slot: Option<String>,
+    pub(super) rollback_action: Option<RollbackAction>,
     pub(super) health_checks: Vec<HealthCheck>,
     pub(super) rollback: RollbackPolicy,
     pub(super) deadline: DateTime<Utc>,

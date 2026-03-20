@@ -32,6 +32,18 @@ pub(super) async fn validate_pending_boot(
         }
     }
 
+    if let Some(expected_root_device) = &pending.expected_root_device {
+        let actual = current_root_device()?;
+        let expected = normalize_device(expected_root_device)?;
+        if actual != expected {
+            return Err(anyhow!(
+                "root device mismatch: expected {}, got {}",
+                expected,
+                actual
+            ));
+        }
+    }
+
     run_health_checks(client, &pending.health_checks).await?;
     Ok(())
 }
@@ -107,9 +119,47 @@ pub(super) fn current_hostname() -> Result<String> {
     if let Ok(path) = env::var("DEPLOY_INTENT_HOSTNAME_FILE") {
         return Ok(fs::read_to_string(path)?.trim().to_string());
     }
-    let raw = fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| fs::read_to_string("/etc/hostname"))?;
-    Ok(raw.trim().to_string())
+    if let Ok(raw) = fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| fs::read_to_string("/etc/hostname"))
+    {
+        return Ok(raw.trim().to_string());
+    }
+    let output = ProcessCommand::new("hostname")
+        .output()
+        .context("running hostname to detect current hostname")?;
+    if !output.status.success() {
+        return Err(anyhow!("hostname command failed while detecting current hostname"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub(super) fn current_root_device() -> Result<String> {
+    if let Ok(path) = env::var("NODA_GRUB_AB_ACTIVE_DEVICE_FILE") {
+        return Ok(normalize_device(fs::read_to_string(path)?.trim())?);
+    }
+
+    let output = ProcessCommand::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "/"])
+        .output()
+        .context("running findmnt to detect current root device")?;
+    if !output.status.success() {
+        return Err(anyhow!("findmnt failed while detecting current root device"));
+    }
+
+    let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if source.is_empty() {
+        return Err(anyhow!("findmnt did not return a current root device"));
+    }
+
+    normalize_device(&source)
+}
+
+fn normalize_device(path: impl AsRef<Path>) -> Result<String> {
+    let path = path.as_ref();
+    if path.exists() {
+        return Ok(fs::canonicalize(path)?.display().to_string());
+    }
+    Ok(path.display().to_string())
 }
 
 pub(super) fn normalize_path(path: impl AsRef<Path>) -> Result<String> {
