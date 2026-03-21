@@ -27,7 +27,6 @@ impl Executor for GrubAbExecutor {
                     artifact_path(ctx).context("grub-ab requires a downloaded artifact path")?;
                 let image_path = prepare_image(spec, source_artifact, &ctx.state_dir)?;
                 write_image_to_device(&image_path, &next_slot.device)?;
-                normalize_inactive_slot_filesystem(next_slot)?;
             } else {
                 let slots_dir = ctx.state_dir.join("slots");
                 fs::create_dir_all(&slots_dir)?;
@@ -199,43 +198,6 @@ fn write_image_to_device(image_path: &Path, device: &str) -> Result<()> {
     Ok(())
 }
 
-fn normalize_inactive_slot_filesystem(slot: &GrubAbSlot) -> Result<()> {
-    let e2fsck_status = Command::new(e2fsck_command())
-        .args(["-f", "-y", &slot.device])
-        .status()
-        .with_context(|| format!("running e2fsck on {}", slot.device))?;
-    if !e2fsck_status.success() {
-        bail!("e2fsck failed while normalizing {}", slot.device);
-    }
-
-    let e2label_status = Command::new(e2label_command())
-        .args([&slot.device, &slot.filesystem_label])
-        .status()
-        .with_context(|| {
-            format!(
-                "running e2label on {} with label {}",
-                slot.device, slot.filesystem_label
-            )
-        })?;
-    if !e2label_status.success() {
-        bail!(
-            "e2label failed while setting {} label to {}",
-            slot.device,
-            slot.filesystem_label
-        );
-    }
-
-    let tune2fs_status = Command::new(tune2fs_command())
-        .args(["-U", "random", &slot.device])
-        .status()
-        .with_context(|| format!("running tune2fs on {}", slot.device))?;
-    if !tune2fs_status.success() {
-        bail!("tune2fs failed while randomizing UUID for {}", slot.device);
-    }
-
-    Ok(())
-}
-
 fn write_saved_entry(boot_control: &GrubAbBootControl, entry: &str) -> Result<()> {
     let mount = BootAuthorityMount::open(boot_control)?;
     let grubenv_path = mount.grubenv_path();
@@ -379,18 +341,6 @@ fn zstd_command() -> String {
     env::var("NODA_ZSTD_COMMAND").unwrap_or_else(|_| "zstd".into())
 }
 
-fn e2fsck_command() -> String {
-    env::var("NODA_E2FSCK_COMMAND").unwrap_or_else(|_| "e2fsck".into())
-}
-
-fn e2label_command() -> String {
-    env::var("NODA_E2LABEL_COMMAND").unwrap_or_else(|_| "e2label".into())
-}
-
-fn tune2fs_command() -> String {
-    env::var("NODA_TUNE2FS_COMMAND").unwrap_or_else(|_| "tune2fs".into())
-}
-
 fn mount_command() -> String {
     env::var("NODA_MOUNT_COMMAND").unwrap_or_else(|_| "mount".into())
 }
@@ -418,13 +368,11 @@ mod tests {
                     name: "A".into(),
                     device: "/dev/disk/by-partlabel/root-a".into(),
                     grub_menu_entry: "noda-slot-a".into(),
-                    filesystem_label: "rootfs-a".into(),
                 },
                 GrubAbSlot {
                     name: "B".into(),
                     device: "/dev/disk/by-partlabel/root-b".into(),
                     grub_menu_entry: "noda-slot-b".into(),
-                    filesystem_label: "rootfs-b".into(),
                 },
             ]),
             boot_control: Some(GrubAbBootControl {

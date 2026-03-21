@@ -1,0 +1,4 @@
+demo artifact v1
+
+Test server nix systemd, agent nix systemd, rollback, make it extendable and not use 
+commands, make safe

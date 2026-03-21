@@ -19,9 +19,18 @@ pub struct ReleaseManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutorSpec {
-    Mock,
+    Noop,
+    Scripted(ScriptedExecutorSpec),
     GrubAb(GrubAbExecutorSpec),
     NixGeneration(NixGenerationExecutorSpec),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptedExecutorSpec {
+    pub artifact: ArtifactSource,
+    pub install_command: String,
+    #[serde(default)]
+    pub activate_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +53,6 @@ pub struct GrubAbSlot {
     pub name: String,
     pub device: String,
     pub grub_menu_entry: String,
-    pub filesystem_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +80,10 @@ pub struct NixGenerationExecutorSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NixGenerationSource {
+    BuildFlake {
+        flake: String,
+        flake_attr: String,
+    },
     CopyFromStore {
         copy_from: String,
         store_path: String,
@@ -217,7 +229,20 @@ impl ReleaseManifest {
         self.validation.validate()?;
 
         match &self.executor {
-            ExecutorSpec::Mock => {}
+            ExecutorSpec::Noop => {}
+            ExecutorSpec::Scripted(spec) => {
+                validate_artifact_source(&spec.artifact)?;
+                if spec.install_command.trim().is_empty() {
+                    return Err(anyhow!("scripted.install_command must not be empty"));
+                }
+                if let Some(command) = &spec.activate_command {
+                    if command.trim().is_empty() {
+                        return Err(anyhow!(
+                            "scripted.activate_command must not be empty when provided"
+                        ));
+                    }
+                }
+            }
             ExecutorSpec::GrubAb(spec) => {
                 validate_artifact_source(&spec.artifact)?;
                 if let Some([left, right]) = &spec.slot_pair {
@@ -241,22 +266,12 @@ impl ReleaseManifest {
                                 "grub_ab.slots grub_menu_entry values must not be empty"
                             ));
                         }
-                        if slot.filesystem_label.trim().is_empty() {
-                            return Err(anyhow!(
-                                "grub_ab.slots filesystem_label values must not be empty"
-                            ));
-                        }
                     }
                     if slots[0].name == slots[1].name {
                         return Err(anyhow!("grub_ab.slots names must be distinct"));
                     }
                     if slots[0].device == slots[1].device {
                         return Err(anyhow!("grub_ab.slots devices must be distinct"));
-                    }
-                    if slots[0].filesystem_label == slots[1].filesystem_label {
-                        return Err(anyhow!(
-                            "grub_ab.slots filesystem_label values must be distinct"
-                        ));
                     }
                     if let Some([left, right]) = &spec.slot_pair {
                         if slots[0].name != *left || slots[1].name != *right {
@@ -297,6 +312,18 @@ impl ReleaseManifest {
                 }
             }
             ExecutorSpec::NixGeneration(spec) => match &spec.source {
+                NixGenerationSource::BuildFlake { flake, flake_attr } => {
+                    if flake.trim().is_empty() {
+                        return Err(anyhow!(
+                            "nix_generation.build_flake.flake must not be empty"
+                        ));
+                    }
+                    if flake_attr.trim().is_empty() {
+                        return Err(anyhow!(
+                            "nix_generation.build_flake.flake_attr must not be empty"
+                        ));
+                    }
+                }
                 NixGenerationSource::CopyFromStore {
                     copy_from,
                     store_path,
@@ -654,14 +681,12 @@ mod tests {
                     {
                         "name": "B",
                         "device": "/dev/disk/by-partlabel/root-b",
-                        "grub_menu_entry": "noda-slot-b",
-                        "filesystem_label": "rootfs-b"
+                        "grub_menu_entry": "noda-slot-b"
                     },
                     {
                         "name": "A",
                         "device": "/dev/disk/by-partlabel/root-a",
-                        "grub_menu_entry": "noda-slot-a",
-                        "filesystem_label": "rootfs-a"
+                        "grub_menu_entry": "noda-slot-a"
                     }
                 ]
             }

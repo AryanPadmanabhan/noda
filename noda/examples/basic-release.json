@@ -1,0 +1,32 @@
+{
+  "version": "2.4.1",
+  "manifest": {
+    "target_type": "edge-linux-x86",
+    "executor": {
+      "kind": "grub_ab",
+      "artifact": {
+        "url": "file:///Users/aryanpaddy/Downloads/noda/examples/demo-artifact.bin",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "headers": {}
+      },
+      "slot_pair": ["A", "B"]
+    },
+    "validation": {
+      "health_checks": [
+        {
+          "name": "demo-pass",
+          "kind": "always_pass"
+        }
+      ]
+    },
+    "rollback": {
+      "automatic": true,
+      "on_boot_failure": true,
+      "on_validation_failure": true,
+      "candidate_timeout_seconds": 900
+    },
+    "labels": {
+      "track": "prod"
+    }
+  }
+}

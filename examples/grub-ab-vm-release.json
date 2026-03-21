@@ -1,0 +1,55 @@
+{
+  "version": "grub-ab-rollback-test-1",
+  "manifest": {
+    "target_type": "edge-linux-x86",
+    "executor": {
+      "kind": "grub_ab",
+      "artifact": {
+        "url": "file:///persist/artifacts/rootfs-b-test.ext4",
+        "sha256": null,
+        "headers": {}
+      },
+      "slot_pair": ["A", "B"],
+      "slots": [
+        {
+          "name": "A",
+          "device": "/dev/disk/by-label/rootfs-a",
+          "grub_menu_entry": "noda-slot-a",
+          "filesystem_label": "rootfs-a"
+        },
+        {
+          "name": "B",
+          "device": "/dev/disk/by-label/rootfs-b",
+          "grub_menu_entry": "noda-slot-b",
+          "filesystem_label": "rootfs-b"
+        }
+      ],
+      "boot_control": {
+        "authority_device": "/dev/disk/by-label/rootfs-a",
+        "mountpoint": "/mnt/noda-bootctl",
+        "grubenv_relpath": "/boot/grub/grubenv"
+      },
+      "compression": "none"
+    },
+    "validation": {
+      "expected_hostname": "not-this-host",
+      "timeout_seconds": 30,
+      "health_checks": [
+        {
+          "name": "noda-active",
+          "kind": "command_exit_zero",
+          "command": "systemctl is-active noda"
+        }
+      ]
+    },
+    "rollback": {
+      "automatic": true,
+      "on_boot_failure": true,
+      "on_validation_failure": true,
+      "candidate_timeout_seconds": 120
+    },
+    "labels": {
+      "track": "test"
+    }
+  }
+}

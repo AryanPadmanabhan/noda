@@ -1,0 +1,18 @@
+{
+  "release_id": "9227f169-f443-4376-bae2-722846e380b9",
+  "rollout_name": "grub-ab-test-rollback-test-1",
+  "selector": {
+    "target_type": "edge-linux-x86",
+    "labels": {
+      "region": "lab"
+    },
+    "mission_states": ["idle"]
+  },
+  "strategy": {
+    "canary": 0,
+    "batch_size": 1,
+    "max_parallel": 1,
+    "max_failure_rate": 1.0,
+    "require_idle": true
+  }
+}

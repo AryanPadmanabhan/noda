@@ -1,0 +1,39 @@
+{
+  "version": "testing-refactor",
+  "manifest": {
+    "target_type": "edge-linux-aarch64",
+    "executor": {
+      "kind": "nix_generation",
+      "source": {
+        "kind": "copy_from_store",
+        "copy_from": "ssh://aryanpaddy@10.2.24.81",
+        "store_path": "/nix/store/495nsh5wviq18bi299xnsmxhysrp1iz6-nixos-system-ota-vm-noda-1-25.11.20260314.e9f278f"
+      }
+    },
+    "validation": {
+      "expected_hostname": "ota-vm-noda-wrong",
+      "timeout_seconds": 10,
+      "health_checks": [
+        {
+          "name": "noda-active",
+          "kind": "command_exit_zero",
+          "command": "systemctl is-active noda"
+        },
+        {
+          "name": "display-manager-active",
+          "kind": "command_exit_zero",
+          "command": "systemctl is-active display-manager"
+        }
+      ]
+    },
+    "rollback": {
+      "automatic": true,
+      "on_boot_failure": true,
+      "on_validation_failure": true,
+      "candidate_timeout_seconds": 900
+    },
+    "labels": {
+      "track": "test"
+    }
+  }
+}

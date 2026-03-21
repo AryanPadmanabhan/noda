@@ -1,9 +1,11 @@
 mod grub_ab;
-mod mock;
 mod nix_generation;
+mod noop;
+mod scripted;
 
 use crate::types::{
     ArtifactSource, ExecutorSpec, GrubAbExecutorSpec, NixGenerationExecutorSpec, ReleaseManifest,
+    ScriptedExecutorSpec,
 };
 use anyhow::{anyhow, Context, Result};
 use std::{
@@ -65,9 +67,10 @@ pub trait Executor: Send + Sync {
 
 pub fn build(spec: &ExecutorSpec) -> Box<dyn Executor> {
     match spec {
-        ExecutorSpec::Mock => Box::new(mock::MockExecutor),
+        ExecutorSpec::Scripted(_) => Box::new(scripted::ScriptedExecutor),
         ExecutorSpec::GrubAb(_) => Box::new(grub_ab::GrubAbExecutor),
         ExecutorSpec::NixGeneration(_) => Box::new(nix_generation::NixGenerationExecutor),
+        ExecutorSpec::Noop => Box::new(noop::NoopExecutor),
     }
 }
 
@@ -76,7 +79,7 @@ pub fn detect_current_slot(spec: &ExecutorSpec) -> Result<Option<String>> {
         ExecutorSpec::GrubAb(grub) if grub.slots.is_some() => {
             Ok(Some(grub_ab::detect_active_slot(grub)?))
         }
-        ExecutorSpec::GrubAb(_) | ExecutorSpec::Mock | ExecutorSpec::NixGeneration(_) => {
+        ExecutorSpec::GrubAb(_) | ExecutorSpec::Noop | ExecutorSpec::Scripted(_) | ExecutorSpec::NixGeneration(_) => {
             Ok(None)
         }
     }
@@ -97,7 +100,14 @@ pub fn rollback_action(
             grub_ab::rollback_action(grub, current_slot).map(Some)
         }
         ExecutorSpec::GrubAb(_) => Ok(None),
-        ExecutorSpec::Mock => Ok(None),
+        ExecutorSpec::Noop | ExecutorSpec::Scripted(_) => Ok(None),
+    }
+}
+
+pub(crate) fn scripted_spec(ctx: &ExecutionContext) -> Result<&ScriptedExecutorSpec> {
+    match &ctx.manifest.executor {
+        ExecutorSpec::Scripted(spec) => Ok(spec),
+        _ => Err(anyhow!("executor mismatch: expected scripted")),
     }
 }
 
@@ -146,8 +156,9 @@ pub(crate) fn shell_env(
 
 pub(crate) fn artifact_source(spec: &ExecutorSpec) -> Option<&ArtifactSource> {
     match spec {
+        ExecutorSpec::Scripted(spec) => Some(&spec.artifact),
         ExecutorSpec::GrubAb(spec) => Some(&spec.artifact),
-        ExecutorSpec::Mock | ExecutorSpec::NixGeneration(_) => None,
+        ExecutorSpec::Noop | ExecutorSpec::NixGeneration(_) => None,
     }
 }
 

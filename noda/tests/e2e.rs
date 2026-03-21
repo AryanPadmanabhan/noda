@@ -273,10 +273,6 @@ fn make_executable(root: &Path, name: &str, body: &str) -> PathBuf {
 struct GrubAbHarness {
     slot_a: PathBuf,
     slot_b: PathBuf,
-    _slot_a_label: PathBuf,
-    slot_b_label: PathBuf,
-    _slot_a_uuid: PathBuf,
-    slot_b_uuid: PathBuf,
     authority_root: PathBuf,
     authority_mountpoint: PathBuf,
     active_device_file: PathBuf,
@@ -284,18 +280,11 @@ struct GrubAbHarness {
     grub_editenv_script: PathBuf,
     mount_script: PathBuf,
     umount_script: PathBuf,
-    e2fsck_script: PathBuf,
-    e2label_script: PathBuf,
-    tune2fs_script: PathBuf,
 }
 
 fn make_grub_ab_harness(root: &Path) -> GrubAbHarness {
     let slot_a = root.join("slot-a.img");
     let slot_b = root.join("slot-b.img");
-    let slot_a_label = root.join("slot-a.label");
-    let slot_b_label = root.join("slot-b.label");
-    let slot_a_uuid = root.join("slot-a.uuid");
-    let slot_b_uuid = root.join("slot-b.uuid");
     let authority_root = root.join("authority-root-a");
     let authority_mountpoint = root.join("authority-mount");
     let grubenv = authority_root.join("boot/grub/grubenv");
@@ -305,10 +294,6 @@ fn make_grub_ab_harness(root: &Path) -> GrubAbHarness {
     fs::create_dir_all(&authority_mountpoint).unwrap();
     fs::write(&slot_a, b"slot-a-initial").unwrap();
     fs::write(&slot_b, b"slot-b-initial").unwrap();
-    fs::write(&slot_a_label, "rootfs-a\n").unwrap();
-    fs::write(&slot_b_label, "stale-slot-b\n").unwrap();
-    fs::write(&slot_a_uuid, "uuid-a-initial\n").unwrap();
-    fs::write(&slot_b_uuid, "uuid-b-initial\n").unwrap();
     fs::write(&grubenv, "saved_entry=noda-slot-a\n").unwrap();
     fs::write(&active_device_file, format!("{}\n", slot_a.display())).unwrap();
     let slot_a_canonical = fs::canonicalize(&slot_a).unwrap();
@@ -363,62 +348,10 @@ exit 0
             active_device = active_device_file.display(),
         ),
     );
-    let e2fsck_script = make_executable(
-        root,
-        "fake-e2fsck.sh",
-        r#"#!/bin/sh
-exit 0
-"#,
-    );
-    let e2label_script = make_executable(
-        root,
-        "fake-e2label.sh",
-        &format!(
-            r#"#!/bin/sh
-device="$1"
-label="$2"
-case "$device" in
-  "{slot_a}") printf '%s\n' "$label" > "{slot_a_label}" ;;
-  "{slot_b}") printf '%s\n' "$label" > "{slot_b_label}" ;;
-  *) exit 1 ;;
-esac
-"#,
-            slot_a = slot_a.display(),
-            slot_b = slot_b.display(),
-            slot_a_label = slot_a_label.display(),
-            slot_b_label = slot_b_label.display(),
-        ),
-    );
-    let tune2fs_script = make_executable(
-        root,
-        "fake-tune2fs.sh",
-        &format!(
-            r#"#!/bin/sh
-mode="$1"
-value="$2"
-device="$3"
-[ "$mode" = "-U" ] || exit 1
-[ "$value" = "random" ] || exit 1
-case "$device" in
-  "{slot_a}") printf 'uuid-a-randomized\n' > "{slot_a_uuid}" ;;
-  "{slot_b}") printf 'uuid-b-randomized\n' > "{slot_b_uuid}" ;;
-  *) exit 1 ;;
-esac
-"#,
-            slot_a = slot_a.display(),
-            slot_b = slot_b.display(),
-            slot_a_uuid = slot_a_uuid.display(),
-            slot_b_uuid = slot_b_uuid.display(),
-        ),
-    );
 
     GrubAbHarness {
         slot_a,
         slot_b,
-        _slot_a_label: slot_a_label,
-        slot_b_label,
-        _slot_a_uuid: slot_a_uuid,
-        slot_b_uuid,
         authority_root,
         authority_mountpoint,
         active_device_file,
@@ -426,9 +359,6 @@ esac
         grub_editenv_script,
         mount_script,
         umount_script,
-        e2fsck_script,
-        e2label_script,
-        tune2fs_script,
     }
 }
 
@@ -530,14 +460,12 @@ async fn create_grub_ab_release(
                     {
                         "name": "A",
                         "device": harness.slot_a,
-                        "grub_menu_entry": "noda-slot-a",
-                        "filesystem_label": "rootfs-a"
+                        "grub_menu_entry": "noda-slot-a"
                     },
                     {
                         "name": "B",
                         "device": harness.slot_b,
-                        "grub_menu_entry": "noda-slot-b",
-                        "filesystem_label": "rootfs-b"
+                        "grub_menu_entry": "noda-slot-b"
                     }
                 ],
                 "boot_control": {
@@ -1034,6 +962,87 @@ async fn require_idle_excludes_busy_assets() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scripted_executor_exports_artifact_env_vars() {
+    let env = test_env(
+        "scripted-env",
+        &[("node-01", "edge-linux-x86", "idle", vec!["region=lab"])],
+    )
+    .await;
+
+    let (artifact_path, sha256) =
+        make_artifact(&env.root, "artifact-scripted.bin", b"scripted-env");
+    let output_path = env.root.join("scripted-env-output.txt");
+    let install_command = format!(
+        "printf '%s|%s|%s' \"$ARTIFACT_PATH\" \"$RELEASE_VERSION\" \"$STATE_DIR\" > {}",
+        output_path.display()
+    );
+    let release = create_release_from_manifest(
+        &env,
+        "7.0.0",
+        json!({
+            "target_type": "edge-linux-x86",
+            "executor": {
+                "kind": "scripted",
+                "artifact": {
+                    "url": Url::from_file_path(&artifact_path).unwrap().to_string(),
+                    "sha256": sha256,
+                    "headers": {}
+                },
+                "install_command": install_command,
+                "activate_command": Value::Null
+            },
+            "validation": {
+                "health_checks": [always_pass_check()]
+            },
+            "rollback": {
+                "automatic": true,
+                "on_boot_failure": true,
+                "on_validation_failure": true,
+                "candidate_timeout_seconds": 900
+            },
+            "labels": {"track": "test"}
+        }),
+    )
+    .await;
+
+    let deployment = create_deployment(
+        &env,
+        &release.id,
+        "edge-linux-x86",
+        json!({"region": "lab"}),
+        vec!["idle"],
+        0,
+        1,
+        1.0,
+        true,
+    )
+    .await;
+
+    wait_until(Duration::from_secs(15), || {
+        let env = &env;
+        let deployment_id = deployment.id.clone();
+        async move {
+            let ts = targets(env, &deployment_id).await;
+            Some(ts.len() == 1 && ts[0].state == "succeeded")
+        }
+    })
+    .await;
+
+    let written = fs::read_to_string(&output_path).unwrap();
+    let parts: Vec<_> = written.split('|').collect();
+    assert_eq!(parts.len(), 3);
+    assert!(
+        parts[0].ends_with("artifact-scripted.bin"),
+        "unexpected artifact path: {written}"
+    );
+    assert_eq!(parts[1], "7.0.0");
+    assert!(
+        parts[2].contains("state-node-01"),
+        "unexpected state dir: {written}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn grub_ab_real_mode_writes_inactive_slot_and_reports_success() {
     let root = unique_root("grub-ab-real-success");
     let (server, server_url) = start_server(&root).await;
@@ -1056,9 +1065,6 @@ async fn grub_ab_real_mode_writes_inactive_slot_and_reports_success() {
             ("NODA_MOUNT_COMMAND", harness.mount_script.to_str().unwrap()),
             ("NODA_UMOUNT_COMMAND", harness.umount_script.to_str().unwrap()),
             ("NODA_REBOOT_COMMAND", harness.reboot_script.to_str().unwrap()),
-            ("NODA_E2FSCK_COMMAND", harness.e2fsck_script.to_str().unwrap()),
-            ("NODA_E2LABEL_COMMAND", harness.e2label_script.to_str().unwrap()),
-            ("NODA_TUNE2FS_COMMAND", harness.tune2fs_script.to_str().unwrap()),
         ],
     );
     let env = TestEnv {
@@ -1115,11 +1121,6 @@ async fn grub_ab_real_mode_writes_inactive_slot_and_reports_success() {
 
     let slot_b = fs::read(&harness.slot_b).unwrap();
     assert_eq!(slot_b, b"bootable-rootfs-image-v1");
-    assert_eq!(fs::read_to_string(&harness.slot_b_label).unwrap().trim(), "rootfs-b");
-    assert_eq!(
-        fs::read_to_string(&harness.slot_b_uuid).unwrap().trim(),
-        "uuid-b-randomized"
-    );
 
     let asets = assets(&env).await;
     assert_eq!(asets[0].current_version.as_deref(), Some("8.0.0"));
@@ -1149,9 +1150,6 @@ async fn grub_ab_real_mode_rolls_back_after_validation_failure() {
             ("NODA_MOUNT_COMMAND", harness.mount_script.to_str().unwrap()),
             ("NODA_UMOUNT_COMMAND", harness.umount_script.to_str().unwrap()),
             ("NODA_REBOOT_COMMAND", harness.reboot_script.to_str().unwrap()),
-            ("NODA_E2FSCK_COMMAND", harness.e2fsck_script.to_str().unwrap()),
-            ("NODA_E2LABEL_COMMAND", harness.e2label_script.to_str().unwrap()),
-            ("NODA_TUNE2FS_COMMAND", harness.tune2fs_script.to_str().unwrap()),
         ],
     );
     let env = TestEnv {
@@ -1209,11 +1207,6 @@ async fn grub_ab_real_mode_rolls_back_after_validation_failure() {
 
     let active_device = fs::read_to_string(&harness.active_device_file).unwrap();
     assert_eq!(active_device.trim(), harness.slot_a.display().to_string());
-    assert_eq!(fs::read_to_string(&harness.slot_b_label).unwrap().trim(), "rootfs-b");
-    assert_eq!(
-        fs::read_to_string(&harness.slot_b_uuid).unwrap().trim(),
-        "uuid-b-randomized"
-    );
 
     let asets = assets(&env).await;
     assert_eq!(asets[0].current_version, None);
