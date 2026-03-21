@@ -48,7 +48,6 @@ Flow:
 - targeted rollouts
 - canary and max-parallel rollout controls
 - artifact-driven Nix deployments using `nix copy --from`
-- build-on-target Nix deployments for bootstraping
 - GRUB-based A/B rootfs deployments using raw `ext4` or `ext4.zst` artifacts
 - post-boot validation
 - automatic rollback after validation failure
@@ -408,5 +407,5 @@ Use:
 
 Use:
 
-- `examples/basic-release.json`
-- `examples/basic-deployment.json`
+- `examples/grub-ab-vm-release.json`
+- `examples/grub-ab-vm-deployment.json`
