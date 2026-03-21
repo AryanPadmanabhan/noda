@@ -1,6 +1,6 @@
 # noda
 
-`noda` is a self-hosted Operating System controller and device agent for self-managed artifacts.
+`noda` is a self-hosted OS OTA control plane and device agent for self-managed artifacts.
 
 It is built around three ideas:
 
